@@ -462,10 +462,10 @@ fn exec_isolated<'py>(py: Python<'py>, runner_id: &str, func: PyObject, args: Op
     locals.set_item("args", args.unwrap_or_else(|| py.None()))?;
     
     // Pickle the function and args and encode in base64
-    let pickle_code = "import pickle, base64; pickled_data = base64.b64encode(pickle.dumps((func, args)))";
+    let pickle_code = "import pickle, base64; pickled_data = base64.b64encode(pickle.dumps((func, args))).decode('utf-8')";
     py.run(pickle_code, None, Some(locals))?;
     
-    // Get the pickled data
+    // Get the pickled data - now it's a string because we decoded it in Python
     let pickled_data = locals.get_item("pickled_data")
         .ok_or_else(|| PyRuntimeError::new_err("Failed to pickle function and args"))?
         .extract::<String>()?;

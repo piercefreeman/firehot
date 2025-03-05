@@ -1,5 +1,7 @@
-#!/usr/bin/env python3
+"""
+This is the main entrypoint for our continuously running parent process.
 
+"""
 import time
 import sys
 import os
@@ -7,6 +9,55 @@ import json
 import traceback
 import pickle
 import base64
+from dataclasses import dataclass, asdict
+from json import loads, dumps
+from enum import StrEnum
+
+class MessageType(StrEnum):
+    FORK_REQUEST = "FORK_REQUEST"
+    FORK_RESPONSE = "FORK_RESPONSE"
+    CHILD_COMPLETE = "CHILD_COMPLETE"
+    CHILD_ERROR = "CHILD_ERROR"
+    UNKNOWN_COMMAND = "UNKNOWN_COMMAND"
+    IMPORT_ERROR = "IMPORT_ERROR"
+    IMPORT_COMPLETE = "IMPORT_COMPLETE"
+
+class MessageBase:
+    name: MessageType
+
+@dataclass
+class ForkRequest(MessageBase):
+    name: str = "FORK_REQUEST"
+    code: str
+
+@dataclass
+class ForkResponse(MessageBase):
+    name: str = "ForkResponse"
+    child_pid: int
+
+@dataclass
+class ChildComplete(MessageBase):
+    name: str = "ChildComplete"
+    result: str
+
+@dataclass
+class ChildError(MessageBase):
+    name: str = "ChildError"
+    error: str
+
+@dataclass
+class UnknownCommandError(MessageBase):
+    error: str
+    traceback: str | None
+
+@dataclass
+class ImportError(MessageBase):
+    error: str
+    traceback: str | None
+
+@dataclass
+class ImportComplete(MessageBase):
+    pass
 
 def main():
     # This will be populated with dynamic import statements from Rust
@@ -49,7 +100,7 @@ def main():
                 # Exit the child process
                 sys.exit(0)
         else:
-            # Parent process
+            # Parent process. The PID will represent the child process.
             return pid
 
     # Main loop - wait for commands on stdin
