@@ -1,13 +1,11 @@
 use anyhow::{anyhow, Result};
 use once_cell::sync::Lazy;
-use std::io::Write;
 use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader},
     path::Path,
     process::{Child, Command, Stdio},
-    time::Duration,
 };
 use walkdir::WalkDir;
 
@@ -17,7 +15,6 @@ use rustpython_parser::ast::{
 use rustpython_parser::{parse, Mode};
 
 // Add PyO3 imports for Python bindings
-use libc;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -29,8 +26,9 @@ pub mod messages;
 pub mod environment;
 pub mod scripts;
 
-use messages::{ExitRequest, ForkRequest, Message};
-use scripts::{PYTHON_LOADER_SCRIPT, PYTHON_CHILD_SCRIPT, PYTHON_CALL_SCRIPT};
+// Export types from messages and scripts for public use
+pub use messages::{Message, ForkRequest, ExitRequest};
+use scripts::{PYTHON_LOADER_SCRIPT, PYTHON_CALL_SCRIPT};
 
 /// A simple structure to hold information about an import.
 #[derive(Debug)]
@@ -83,25 +81,25 @@ fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
                 }
             }
             Stmt::If(inner) => {
-                let if_stmt: &StmtIf = &*inner;
+                let if_stmt: &StmtIf = inner;
                 imports.extend(collect_imports(&if_stmt.body));
                 imports.extend(collect_imports(&if_stmt.orelse));
             }
             Stmt::While(inner) => {
-                let while_stmt: &StmtWhile = &*inner;
+                let while_stmt: &StmtWhile = inner;
                 imports.extend(collect_imports(&while_stmt.body));
                 imports.extend(collect_imports(&while_stmt.orelse));
             }
             Stmt::FunctionDef(inner) => {
-                let func_def: &StmtFunctionDef = &*inner;
+                let func_def: &StmtFunctionDef = inner;
                 imports.extend(collect_imports(&func_def.body));
             }
             Stmt::AsyncFunctionDef(inner) => {
-                let func_def: &StmtAsyncFunctionDef = &*inner;
+                let func_def: &StmtAsyncFunctionDef = inner;
                 imports.extend(collect_imports(&func_def.body));
             }
             Stmt::ClassDef(inner) => {
-                let class_def: &StmtClassDef = &*inner;
+                let class_def: &StmtClassDef = inner;
                 imports.extend(collect_imports(&class_def.body));
             }
             _ => {}

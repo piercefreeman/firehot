@@ -1,41 +1,29 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::{
-    fs,
-    io::{BufRead, BufReader},
-    path::Path,
-    process::{Child, Command, Stdio},
-    collections::{HashMap, HashSet},
+    io::BufReader,
+    process::Child,
+    collections::HashMap,
     time::Duration,
 };
-use walkdir::WalkDir;
-use once_cell::sync::Lazy;
 use std::io::Write;
 
-use rustpython_parser::{parse, Mode};
-use rustpython_parser::ast::{
-    Mod, Stmt,
-    StmtIf, StmtWhile, StmtFunctionDef, StmtAsyncFunctionDef, StmtClassDef,
-};
 
 // Add PyO3 imports for Python bindings
-use pyo3::prelude::*;
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::types::PyDict;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use libc;
-use scripts::{PYTHON_LOADER_SCRIPT, PYTHON_CHILD_SCRIPT, PYTHON_CALL_SCRIPT};
+use scripts::PYTHON_CHILD_SCRIPT;
 
-use crate::messages;
+use crate::messages::{Message, ForkRequest, ExitRequest};
 use crate::scripts;
 
 /// Runner for isolated Python code execution
 pub struct ImportRunner {
-    id: String,
-    child: Arc<Mutex<Child>>,
-    stdin: Arc<Mutex<std::process::ChildStdin>>,
-    reader: Arc<Mutex<std::io::Lines<BufReader<std::process::ChildStdout>>>>,
-    forked_processes: Arc<Mutex<HashMap<String, i32>>>, // Map of UUID to PID
+    pub id: String,
+    pub child: Arc<Mutex<Child>>,
+    pub stdin: Arc<Mutex<std::process::ChildStdin>>,
+    pub reader: Arc<Mutex<std::io::Lines<BufReader<std::process::ChildStdout>>>>,
+    pub forked_processes: Arc<Mutex<HashMap<String, i32>>>, // Map of UUID to PID
 }
 
 impl ImportRunner {
@@ -86,11 +74,11 @@ pickled_str = "{}"
             let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
             
             // Parse the line as a message
-            if let Ok(message) = serde_json::from_str::<messages::Message>(&line) {
+            if let Ok(message) = serde_json::from_str::<Message>(&line) {
                 println!("Received message: {:?}", message);
 
                 match message {
-                    messages::Message::ForkResponse(response) => {
+                    Message::ForkResponse(response) => {
                         // Handle fork response message
                         let fork_pid = response.child_pid;
                         
@@ -109,11 +97,11 @@ pickled_str = "{}"
                         // Return the UUID
                         return Ok(process_uuid);
                     },
-                    messages::Message::ChildError(error) => {
+                    Message::ChildError(error) => {
                         // Handle child error message
                         return Err(format!("Function execution failed: {}", error.error));
                     },
-                    messages::Message::UnknownError(error) => {
+                    Message::UnknownError(error) => {
                         // Handle unknown error message
                         return Err(format!("Process error: {}", error.error));
                     },
@@ -143,7 +131,7 @@ pickled_str = "{}"
                 .map_err(|e| format!("Failed to lock stdin mutex: {}", e))?;
             
             // Create an ExitRequest message
-            let exit_request = messages::ExitRequest::new();
+            let exit_request = ExitRequest::new();
             let serialized = serde_json::to_string(&exit_request)
                 .map_err(|e| format!("Failed to serialize message: {}", e))?;
             writeln!(stdin_guard, "{}", serialized)
@@ -193,15 +181,15 @@ pickled_str = "{}"
                 Some(Ok(line)) => {
                     println!("Read line: {}", line);
                     // Parse the line as a message
-                    if let Ok(message) = serde_json::from_str::<messages::Message>(&line) {
+                    if let Ok(message) = serde_json::from_str::<Message>(&line) {
                         match message {
-                            messages::Message::ChildComplete(complete) => {
+                            Message::ChildComplete(complete) => {
                                 // If we have a result, return it
                                 if let Some(result) = complete.result {
                                     return Ok(Some(result));
                                 }
                             },
-                            messages::Message::ChildError(error) => {
+                            Message::ChildError(error) => {
                                 // Return error message as output
                                 return Ok(Some(format!("Error: {}", error.error)));
                             },

@@ -48,6 +48,12 @@ impl MessageBase for ExitRequest {
     }
 }
 
+impl Default for ExitRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExitRequest {
     pub fn new() -> Self {
         Self {}
@@ -171,6 +177,12 @@ pub struct ImportComplete {}
 impl MessageBase for ImportComplete {
     fn name(&self) -> MessageType {
         MessageType::ImportComplete
+    }
+}
+
+impl Default for ImportComplete {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
