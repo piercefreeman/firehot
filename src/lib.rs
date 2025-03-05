@@ -26,6 +26,7 @@ use libc;
 
 // Define our messages module
 pub mod messages;
+use messages::{ForkRequest, ForkResponse, ChildError, UnknownError};
 
 /// A simple structure to hold information about an import.
 #[derive(Debug)]
@@ -235,8 +236,6 @@ impl ImportRunner {
         &self, 
         pickled_data: &str
     ) -> Result<String, String> {
-        println!("Pickled data: {:?}", pickled_data);
-
         // Create the Python execution code that will unpickle and run the function
         let exec_code = format!(
             r#"
@@ -264,8 +263,12 @@ print("RAN RESULT")
         // Send the code to the forked process
         let mut stdin_guard = self.stdin.lock()
             .map_err(|e| format!("Failed to lock stdin mutex: {}", e))?;
-        writeln!(stdin_guard, "FORK:{}", exec_code)
+        
+        // Create a ForkRequest message instead of raw string
+        let fork_request = ForkRequest::new(exec_code);
+        messages::io::write_message(&mut stdin_guard, &fork_request)
             .map_err(|e| format!("Failed to write to child process: {}", e))?;
+        
         drop(stdin_guard);
         
         // Wait for response
@@ -275,34 +278,41 @@ print("RAN RESULT")
         for line in &mut *reader_guard {
             let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
             
-            if line.starts_with("FORKED:") {
-                let fork_pid = line[7..].parse::<i32>()
-                    .map_err(|_| "Invalid fork PID".to_string())?;
-                
-                // Generate a UUID for this process
-                let process_uuid = format!("{}", uuid::Uuid::new_v4());
-                
-                // Store the PID with its UUID
-                let mut forked_processes = self.forked_processes.lock()
-                    .map_err(|e| format!("Failed to lock forked processes mutex: {}", e))?;
-                forked_processes.insert(process_uuid.clone(), fork_pid);
-                drop(forked_processes);
-                
-                // Wait a bit for the fork to complete to avoid race conditions
-                std::thread::sleep(Duration::from_millis(100));
-                
-                // Return the UUID
-                return Ok(process_uuid);
-            }
-            
-            if line.starts_with("FORK_RUN_ERROR:") {
-                let error_json = &line[14..];
-                return Err(format!("Function execution failed: {}", error_json));
-            }
-            
-            if line.starts_with("ERROR:") {
-                let error_msg = &line[6..];
-                return Err(format!("Process error: {}", error_msg));
+            // Try to parse the line as a message
+            if let Ok(Some(message)) = serde_json::from_str::<messages::Message>(&line) {
+                match message {
+                    messages::Message::ForkResponse(response) => {
+                        // Handle fork response message
+                        let fork_pid = response.child_pid;
+                        
+                        // Generate a UUID for this process
+                        let process_uuid = Uuid::new_v4().to_string();
+                        
+                        // Store the PID with its UUID
+                        let mut forked_processes = self.forked_processes.lock()
+                            .map_err(|e| format!("Failed to lock forked processes mutex: {}", e))?;
+                        forked_processes.insert(process_uuid.clone(), fork_pid);
+                        drop(forked_processes);
+                        
+                        // Wait a bit for the fork to complete to avoid race conditions
+                        std::thread::sleep(Duration::from_millis(100));
+                        
+                        // Return the UUID
+                        return Ok(process_uuid);
+                    },
+                    messages::Message::ChildError(error) => {
+                        // Handle child error message
+                        return Err(format!("Function execution failed: {}", error.error));
+                    },
+                    messages::Message::UnknownError(error) => {
+                        // Handle unknown error message
+                        return Err(format!("Process error: {}", error.error));
+                    },
+                    _ => {
+                        // Ignore other message types
+                        continue;
+                    }
+                }
             }
         }
         
@@ -315,7 +325,20 @@ print("RAN RESULT")
             .map_err(|e| format!("Failed to lock forked processes mutex: {}", e))?;
             
         if let Some(pid) = forked_processes.get(process_uuid) {
-            // This process owns the UUID, terminate the process
+            // Send EXIT_REQUEST message to the process
+            let mut stdin_guard = self.stdin.lock()
+                .map_err(|e| format!("Failed to lock stdin mutex: {}", e))?;
+            
+            // Create an ExitRequest message
+            let exit_request = messages::ExitRequest::new();
+            messages::io::write_message(&mut stdin_guard, &exit_request)
+                .map_err(|e| format!("Failed to write exit request: {}", e))?;
+            drop(stdin_guard);
+            
+            // Give the process a chance to exit gracefully
+            std::thread::sleep(Duration::from_millis(100));
+            
+            // If it's still running, terminate it forcefully
             unsafe {
                 // Use libc::kill to terminate the process
                 if libc::kill(*pid, libc::SIGTERM) != 0 {
@@ -348,14 +371,36 @@ print("RAN RESULT")
             .map_err(|e| format!("Failed to lock reader mutex: {}", e))?;
             
         // Check if there's any output available (non-blocking)
-        // Note: This is a simplistic approach; for a real implementation,
-        // you might need a more sophisticated way to read output from specific processes
         let mut output = String::new();
         for _ in 0..10 { // Try reading up to 10 lines (limit to avoid infinite loop)
             match reader_guard.next() {
                 Some(Ok(line)) => {
-                    output.push_str(&line);
-                    output.push('\n');
+                    // Try to parse the line as a message
+                    if let Ok(Some(message)) = serde_json::from_str::<messages::Message>(&line) {
+                        match message {
+                            messages::Message::ChildComplete(complete) => {
+                                // If we have a result, return it
+                                if let Some(result) = complete.result {
+                                    return Ok(Some(result));
+                                }
+                            },
+                            messages::Message::ChildError(error) => {
+                                // Return error message as output
+                                return Ok(Some(format!("Error: {}", error.error)));
+                            },
+                            _ => {
+                                // For other message types, add them to the output
+                                let json = serde_json::to_string(&message)
+                                    .map_err(|e| format!("Failed to serialize message: {}", e))?;
+                                output.push_str(&json);
+                                output.push('\n');
+                            }
+                        }
+                    } else {
+                        // Fallback for non-message lines
+                        output.push_str(&line);
+                        output.push('\n');
+                    }
                 },
                 Some(Err(e)) => return Err(format!("Error reading output: {}", e)),
                 None => break, // No more output
