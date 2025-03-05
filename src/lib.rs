@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Result};
 use std::{
-    collections::HashSet,
     fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -21,6 +20,9 @@ use pyo3::types::{PyBytes, PyDict};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use once_cell::sync::Lazy;
+use std::collections::{HashMap, HashSet};
+use uuid::Uuid;
+use libc;
 
 /// A simple structure to hold information about an import.
 #[derive(Debug)]
@@ -178,7 +180,7 @@ fn process_py_files(path: &Path) -> Result<(HashSet<String>, Option<String>)> {
 }
 
 // Embed the Python loader script directly in the binary
-const PYTHON_LOADER_SCRIPT: &str = include_str!("../python/loader.py");
+const PYTHON_LOADER_SCRIPT: &str = include_str!("../python/parent_entrypoint.py");
 
 /// Spawn a Python process that imports the given modules and then waits for commands on stdin.
 /// The Python process prints "IMPORTS_LOADED" to stdout once all imports are complete.
@@ -211,47 +213,35 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
     Ok(child)
 }
 
+// Replace single IMPORT_RUNNER with a registry of runners
+static IMPORT_RUNNERS: Lazy<Mutex<HashMap<String, ImportRunner>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
 /// Runner for isolated Python code execution
-#[pyclass]
 struct ImportRunner {
+    id: String,
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<std::process::ChildStdin>>,
     reader: Arc<Mutex<std::io::Lines<BufReader<std::process::ChildStdout>>>>,
+    forked_processes: Arc<Mutex<HashMap<String, i32>>>, // Map of UUID to PID
 }
 
-#[pymethods]
 impl ImportRunner {
-    /// Execute a function in the isolated environment
-    #[pyo3(text_signature = "(func, args, /)")]
-    fn exec<'py>(
+    /// Execute a function in the isolated environment. This should be called from the main thread (the one
+    /// that spawned our hotreloader) so we can get the local function and closure variables.
+    fn exec_isolated(
         &self, 
-        py: Python<'py>, 
-        func: PyObject, 
-        args: Option<PyObject>
-    ) -> PyResult<&'py PyAny> {
-        // Create a dict to hold our function and args for pickling
-        let locals = PyDict::new(py);
-        locals.set_item("func", func)?;
-        locals.set_item("args", args.unwrap_or_else(|| py.None()))?;
-        
-        // Pickle the function and args
-        let pickle_code = "import pickle; pickled_data = pickle.dumps((func, args))";
-        py.run(pickle_code, None, Some(locals))?;
-        
-        // Get the pickled data
-        let pickled_data = locals.get_item("pickled_data")
-            .ok_or_else(|| PyRuntimeError::new_err("Failed to pickle function and args"))?;
-        let _pickled_bytes = pickled_data.downcast::<PyBytes>()
-            .map_err(|_| PyRuntimeError::new_err("Pickled data is not bytes"))?;
-        
+        pickled_data: &str
+    ) -> Result<String, String> {
+        println!("Pickled data: {:?}", pickled_data);
+
         // Create the Python execution code that will unpickle and run the function
         let exec_code = format!(
             r#"
 import pickle
 import base64
 
-# Base64 encode for safe transmission
-pickled_bytes = {}
+# Decode base64 and unpickle
+pickled_bytes = base64.b64decode({})
 data = pickle.loads(pickled_bytes)
 func, args = data
 
@@ -262,50 +252,118 @@ elif args is not None:
     result = func(args)
 else:
     result = func()
+
+print("RAN RESULT")
             "#, 
-            py.eval("repr(pickled_data)", None, None)?
+            pickled_data
         );
         
         // Send the code to the forked process
         let mut stdin_guard = self.stdin.lock()
-            .map_err(|_| PyRuntimeError::new_err("Failed to lock stdin mutex"))?;
+            .map_err(|e| format!("Failed to lock stdin mutex: {}", e))?;
         writeln!(stdin_guard, "FORK:{}", exec_code)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to write to child process: {}", e)))?;
+            .map_err(|e| format!("Failed to write to child process: {}", e))?;
         drop(stdin_guard);
         
         // Wait for response
         let mut reader_guard = self.reader.lock()
-    .map_err(|_| PyRuntimeError::new_err("Failed to lock reader mutex"))?;
+            .map_err(|e| format!("Failed to lock reader mutex: {}", e))?;
 
-        
-    for line in &mut *reader_guard {
-        let line = line.map_err(|e| PyRuntimeError::new_err(format!("Failed to read line: {}", e)))?;
+        for line in &mut *reader_guard {
+            let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
             
             if line.starts_with("FORKED:") {
                 let fork_pid = line[7..].parse::<i32>()
-                    .map_err(|_| PyRuntimeError::new_err("Invalid fork PID"))?;
-                py.allow_threads(|| {
-                    // Wait a bit for the fork to complete to avoid race conditions
-                    std::thread::sleep(Duration::from_millis(100));
-                });
-                return Ok(py.eval(
-                    &format!("print('Function running in forked process (PID: {}')", fork_pid), 
-                    None, None
-                )?);
+                    .map_err(|_| "Invalid fork PID".to_string())?;
+                
+                // Generate a UUID for this process
+                let process_uuid = format!("{}", uuid::Uuid::new_v4());
+                
+                // Store the PID with its UUID
+                let mut forked_processes = self.forked_processes.lock()
+                    .map_err(|e| format!("Failed to lock forked processes mutex: {}", e))?;
+                forked_processes.insert(process_uuid.clone(), fork_pid);
+                drop(forked_processes);
+                
+                // Wait a bit for the fork to complete to avoid race conditions
+                std::thread::sleep(Duration::from_millis(100));
+                
+                // Return the UUID
+                return Ok(process_uuid);
             }
             
             if line.starts_with("FORK_RUN_ERROR:") {
                 let error_json = &line[14..];
-                return Err(PyRuntimeError::new_err(format!("Function execution failed: {}", error_json)));
+                return Err(format!("Function execution failed: {}", error_json));
             }
             
             if line.starts_with("ERROR:") {
                 let error_msg = &line[6..];
-                return Err(PyRuntimeError::new_err(format!("Process error: {}", error_msg)));
+                return Err(format!("Process error: {}", error_msg));
             }
         }
         
-        Err(PyRuntimeError::new_err("Unexpected end of output from child process"))
+        Err("Unexpected end of output from child process".to_string())
+    }
+    
+    /// Stop an isolated process by UUID
+    fn stop_isolated(&self, process_uuid: &str) -> Result<bool, String> {
+        let mut forked_processes = self.forked_processes.lock()
+            .map_err(|e| format!("Failed to lock forked processes mutex: {}", e))?;
+            
+        if let Some(pid) = forked_processes.get(process_uuid) {
+            // This process owns the UUID, terminate the process
+            unsafe {
+                // Use libc::kill to terminate the process
+                if libc::kill(*pid, libc::SIGTERM) != 0 {
+                    return Err(format!("Failed to terminate process: {}", std::io::Error::last_os_error()));
+                }
+            }
+            
+            // Remove the process from the map
+            forked_processes.remove(process_uuid);
+            Ok(true)
+        } else {
+            // This process doesn't own the UUID
+            Ok(false)
+        }
+    }
+    
+    /// Communicate with an isolated process to get its output
+    fn communicate_isolated(&self, process_uuid: &str) -> Result<Option<String>, String> {
+        let forked_processes = self.forked_processes.lock()
+            .map_err(|e| format!("Failed to lock forked processes mutex: {}", e))?;
+            
+        if !forked_processes.contains_key(process_uuid) {
+            // This process doesn't own the UUID
+            return Ok(None);
+        }
+        drop(forked_processes);
+        
+        // Read from the reader
+        let mut reader_guard = self.reader.lock()
+            .map_err(|e| format!("Failed to lock reader mutex: {}", e))?;
+            
+        // Check if there's any output available (non-blocking)
+        // Note: This is a simplistic approach; for a real implementation,
+        // you might need a more sophisticated way to read output from specific processes
+        let mut output = String::new();
+        for _ in 0..10 { // Try reading up to 10 lines (limit to avoid infinite loop)
+            match reader_guard.next() {
+                Some(Ok(line)) => {
+                    output.push_str(&line);
+                    output.push('\n');
+                },
+                Some(Err(e)) => return Err(format!("Error reading output: {}", e)),
+                None => break, // No more output
+            }
+        }
+        
+        if output.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(output))
+        }
     }
 }
 
@@ -315,17 +373,16 @@ fn hotreload(_py: Python, m: &PyModule) -> PyResult<()> {
     // Register the module functions
     m.add_function(wrap_pyfunction!(start_import_runner, m)?)?;
     m.add_function(wrap_pyfunction!(stop_import_runner, m)?)?;
-    // m.add_function(wrap_pyfunction!(isolate_imports, m)?)?;
+    m.add_function(wrap_pyfunction!(exec_isolated, m)?)?;
+    m.add_function(wrap_pyfunction!(stop_isolated, m)?)?;
+    m.add_function(wrap_pyfunction!(communicate_isolated, m)?)?;
     
     Ok(())
 }
 
-// Global storage for the import runner
-static IMPORT_RUNNER: Lazy<Mutex<Option<ImportRunner>>> = Lazy::new(|| Mutex::new(None));
-
-/// Initialize and start the import runner
+/// Initialize and start the import runner, returning a unique identifier
 #[pyfunction]
-fn start_import_runner(py: Python, package_path: &str) -> PyResult<()> {
+fn start_import_runner(py: Python, package_path: &str) -> PyResult<String> {
     // Process Python files
     let (modules, package_name) = process_py_files(Path::new(package_path))
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to process Python files: {}", e)))?;
@@ -362,156 +419,89 @@ fn start_import_runner(py: Python, package_path: &str) -> PyResult<()> {
         return Err(PyRuntimeError::new_err("Python loader did not report successful imports"));
     }
     
-    // Create the runner object with the existing reader instead of trying to create a new one
-    //let reader = lines_iter.into_iter();
+    // Generate a unique identifier for this runner
+    let runner_id = Uuid::new_v4().to_string();
     
     // Create the runner object
     let runner = ImportRunner {
+        id: runner_id.clone(),
         child: Arc::new(Mutex::new(child)),
         stdin: Arc::new(Mutex::new(stdin)),
         reader: Arc::new(Mutex::new(lines_iter)),
+        forked_processes: Arc::new(Mutex::new(HashMap::new())),
     };
     
-    // Store in global storage
-    let mut global_runner = IMPORT_RUNNER.lock().unwrap();
-    *global_runner = Some(runner);
+    // Store in global registry
+    let mut runners = IMPORT_RUNNERS.lock().unwrap();
+    runners.insert(runner_id.clone(), runner);
     
-    Ok(())
+    Ok(runner_id)
 }
 
-/// Stop the import runner
+/// Stop the import runner with the given ID
 #[pyfunction]
-fn stop_import_runner(_py: Python) -> PyResult<()> {
-    let mut global_runner = IMPORT_RUNNER.lock().unwrap();
-    if let Some(runner) = global_runner.take() {
+fn stop_import_runner(_py: Python, runner_id: &str) -> PyResult<()> {
+    let mut runners = IMPORT_RUNNERS.lock().unwrap();
+    if let Some(runner) = runners.remove(runner_id) {
         // Clean up resources
         let mut child = runner.child.lock().unwrap();
         let _ = child.kill();
         let _ = child.wait();
+        Ok(())
+    } else {
+        Err(PyRuntimeError::new_err(format!("No import runner found with ID: {}", runner_id)))
     }
-    
-    Ok(())
 }
 
-/*#[pyfunction]
-fn isolate_imports(py: Python, package_path: &str) -> PyResult<PyObject> {
-    // First, ensure we have a runner available
-    {
-        let global_runner = IMPORT_RUNNER.lock().unwrap();
-        if global_runner.is_none() {
-            start_import_runner(py, package_path)?;
+/// Execute code with a specific runner
+#[pyfunction]
+fn exec_isolated<'py>(py: Python<'py>, runner_id: &str, func: PyObject, args: Option<PyObject>) -> PyResult<&'py PyAny> {
+    // Create a dict to hold our function and args for pickling
+    let locals = PyDict::new(py);
+    locals.set_item("func", func)?;
+    locals.set_item("args", args.unwrap_or_else(|| py.None()))?;
+    
+    // Pickle the function and args and encode in base64
+    let pickle_code = "import pickle, base64; pickled_data = base64.b64encode(pickle.dumps((func, args)))";
+    py.run(pickle_code, None, Some(locals))?;
+    
+    // Get the pickled data
+    let pickled_data = locals.get_item("pickled_data")
+        .ok_or_else(|| PyRuntimeError::new_err("Failed to pickle function and args"))?
+        .extract::<String>()?;
+
+    let runners = IMPORT_RUNNERS.lock().unwrap();
+    if let Some(runner) = runners.get(runner_id) {
+        // Convert Rust Result<String, String> to PyResult
+        match runner.exec_isolated(&pickled_data) {
+            Ok(result) => Ok(py.eval(&format!("'{}'", result), None, None)?),
+            Err(err) => Err(PyRuntimeError::new_err(err))
         }
+    } else {
+        Err(PyRuntimeError::new_err(format!("No import runner found with ID: {}", runner_id)))
     }
-    
-    // Create a Python module with the functions needed
-    let sys = py.import("sys")?;
-    let builtins = py.import("builtins")?;
-    let importlib = py.import("importlib")?;
-    
-    // Return the Python module with utilities
-    let module = PyModule::new(py, "hotreload_utils")?;
-    module.add("sys", sys)?;
-    module.add("builtins", builtins)?;
-    module.add("importlib", importlib)?;
-    
-    Ok(module.into())
 }
 
-/// Main function tying all steps together.
-pub fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        return Err(anyhow!("Usage: {} <path_to_scan>", args[0]));
+/// Stop an isolated process by ID
+#[pyfunction]
+fn stop_isolated(_py: Python, runner_id: &str, process_uuid: &str) -> PyResult<bool> {
+    let runners = IMPORT_RUNNERS.lock().unwrap();
+    if let Some(runner) = runners.get(runner_id) {
+        runner.stop_isolated(process_uuid)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to stop isolated process: {}", e)))
+    } else {
+        Err(PyRuntimeError::new_err(format!("No import runner found with ID: {}", runner_id)))
     }
-    let scan_path = PathBuf::from(&args[1]);
+}
 
-    // 1. Process Python files.
-    let (modules, package_name) = process_py_files(&scan_path)?;
-    println!("Package name: {:?}", package_name);
-    println!("Found third-party modules to load: {:?}", modules);
-
-    // 2. Spawn a Python process to load these modules.
-    let mut child = spawn_python_loader(&modules)?;
-
-    // 3. Read stdout until we see "IMPORTS_LOADED".
-    let stdout = child.stdout.take()
-        .ok_or_else(|| anyhow!("Failed to capture stdout from python process"))?;
-    let mut stdin = child.stdin.take()
-        .ok_or_else(|| anyhow!("Failed to capture stdin for python process"))?;
-    
-    let reader = BufReader::new(stdout);
-    let mut lines = reader.lines();
-    
-    // Wait for imports to complete
-    loop {
-        if let Some(Ok(line)) = lines.next() {
-            println!("Python process: {}", line);
-            if line.trim() == "IMPORTS_LOADED" {
-                break;
-            }
-        } else {
-            return Err(anyhow!("Python process terminated unexpectedly before imports completed"));
-        }
+/// Communicate with an isolated process to get its output
+#[pyfunction]
+fn communicate_isolated(_py: Python, runner_id: &str, process_uuid: &str) -> PyResult<Option<String>> {
+    let runners = IMPORT_RUNNERS.lock().unwrap();
+    if let Some(runner) = runners.get(runner_id) {
+        runner.communicate_isolated(process_uuid)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to communicate with isolated process: {}", e)))
+    } else {
+        Err(PyRuntimeError::new_err(format!("No import runner found with ID: {}", runner_id)))
     }
-
-    // 4. Demonstrate forking and executing code
-    println!("Sending code to first child process...");
-    writeln!(stdin, "FORK:print('Hello from child process 1')")
-        .map_err(|e| anyhow!("Failed to write to stdin: {}", e))?;
-    
-    // Wait for response from the fork
-    let mut fork_complete = false;
-    while !fork_complete {
-        if let Some(Ok(line)) = lines.next() {
-            println!("Python process: {}", line);
-            if line.starts_with("FORKED:") {
-                // Successfully forked
-                let fork_pid = line.trim_start_matches("FORKED:");
-                println!("Forked child process with PID: {}", fork_pid);
-            } else if line.starts_with("FORK_RUN_COMPLETE:") {
-                fork_complete = true;
-            } else if line.starts_with("FORK_RUN_ERROR:") {
-                return Err(anyhow!("Error in child process: {}", 
-                    line.trim_start_matches("FORK_RUN_ERROR:")));
-            }
-        } else {
-            return Err(anyhow!("Python process terminated unexpectedly during first fork"));
-        }
-    }
-    
-    // Sleep briefly to ensure first process completes
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    
-    // 5. Launch a second child process
-    println!("Sending code to second child process...");
-    writeln!(stdin, "FORK:print('Hello from child process 2')")
-        .map_err(|e| anyhow!("Failed to write to stdin: {}", e))?;
-    
-    // Wait for response from the second fork
-    fork_complete = false;
-    while !fork_complete {
-        if let Some(Ok(line)) = lines.next() {
-            println!("Python process: {}", line);
-            if line.starts_with("FORKED:") {
-                // Successfully forked
-                let fork_pid = line.trim_start_matches("FORKED:");
-                println!("Forked second child process with PID: {}", fork_pid);
-            } else if line.starts_with("FORK_RUN_COMPLETE:") {
-                fork_complete = true;
-            } else if line.starts_with("FORK_RUN_ERROR:") {
-                return Err(anyhow!("Error in second child process: {}", 
-                    line.trim_start_matches("FORK_RUN_ERROR:")));
-            }
-        } else {
-            return Err(anyhow!("Python process terminated unexpectedly during second fork"));
-        }
-    }
-    
-    // 6. Clean up
-    println!("Demo complete. Terminating Python process.");
-    writeln!(stdin, "EXIT")
-        .map_err(|e| anyhow!("Failed to write exit command: {}", e))?;
-    
-    child.wait()?;
-    Ok(())
-}*/
+}

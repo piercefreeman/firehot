@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Example demonstrating the isolate_imports context manager.
+Example demonstrating the isolate_imports context manager with multiple concurrent runners.
 
 This shows how to:
 1. Isolate imports for a specific package path
-2. Execute functions in a forked process using async/await syntax
+2. Execute functions in a forked process
+3. Use multiple concurrent import runners
 
 Run this with:
-    python examples/isolate_imports_example.py
+    python mypackage/test_hotreload.py
 """
 
 import asyncio
@@ -27,43 +28,38 @@ def global_fn(msg: str, count: int) -> str:
     Returns:
         str: A completion message
     """
-    print(f"Running in forked process with PID: {__import__('os').getpid()}")
+    with open("test.txt", "w") as f:
+        f.write(f"Running in forked process with PID: {__import__('os').getpid()}")
+
     for i in range(count):
         print(f"{i+1}: {msg}")
         time.sleep(0.5)
     return f"Completed {count} iterations"
 
 async def main() -> None:
-    """Main example function demonstrating the requested API."""
-    # Path to the package to isolate imports for
-    package_path = str(Path(".").absolute())  # Current directory, adjust as needed
+    """Run tasks with a specific runner."""
+    package_path = str(Path(".").absolute())
+    runner_name = "test_hotreload"
     
-    print("Starting with isolate_imports context manager...")
-    
-    # Use the context manager as specified in the API request
     with isolate_imports(package_path) as runner:
-        print("Imports have been loaded in an isolated process")
+        print(f"{runner_name}: Imports have been loaded in an isolated process")
         
-        # Wait for a bit as specified in the requested API
-        print("Sleeping for 10 seconds...")
-        await asyncio.sleep(10)
-        
-        # Execute a function in the forked process, as specified in the API
-        print("\nExecuting function in forked process...")
-        # Pass a tuple as args
-        await runner.exec(
+        # Execute a function in the forked process
+        print(f"\n{runner_name}: Executing function in forked process...")
+        result = runner.exec(
             global_fn,
-            ("Hello from isolate_imports!", 3)
+            f"Hello from {runner_name}!",
+            3
         )
-        
-        # Execute another function with different arguments
-        print("\nExecuting function again with different arguments...")
-        await runner.exec(
-            global_fn,
-            ("Second execution", 2)
-        )
-    
-    print("\nContext manager exited")
+        print(f"{runner_name} result: {result}")
+
+        # Wait 5s
+        # Then communicate with the forked process
+        # And print the output
+        time.sleep(5)
+        result = runner.communicate_isolated(result)
+        print(f"{runner_name} result: {result}")
+
 
 if __name__ == "__main__":
     asyncio.run(main()) 
