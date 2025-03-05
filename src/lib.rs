@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use std::{
     collections::HashSet,
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
 };
@@ -169,9 +169,11 @@ fn process_py_files(path: &Path) -> Result<(HashSet<String>, Option<String>)> {
     Ok((third_party_modules, package_name))
 }
 
-/// Spawn a Python process that imports the given modules and then sleeps indefinitely.
+/// Spawn a Python process that imports the given modules and then waits for commands on stdin.
 /// The Python process prints "IMPORTS_LOADED" to stdout once all imports are complete.
+/// After that, it will listen for commands on stdin, which can include fork requests and code to execute.
 fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
+    // Create import code for Python to execute
     let mut import_lines = String::new();
     for module in modules {
         import_lines.push_str(&format!(
@@ -179,60 +181,23 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
             module, module
         ));
     }
-    let python_script = format!(
-        r#"
-import time
-import sys
-{}
-print("IMPORTS_LOADED", flush=True)
-time.sleep(1000)
-"#,
-        import_lines
-    );
+    
+    // Path to the Python loader script
+    let loader_script_path = Path::new("python/loader.py");
+    if !loader_script_path.exists() {
+        return Err(anyhow!("Python loader script not found at: {:?}", loader_script_path));
+    }
+    
+    // Launch the Python process with the loader script
     let child = Command::new("python")
-        .args(&["-c", &python_script])
+        .arg(loader_script_path)
+        .arg(import_lines)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| anyhow!("Failed to spawn python process: {}", e))?;
+    
     Ok(child)
-}
-
-/// Take a memory snapshot of the process with the given PID and save it to `dump_dir`.
-/// On Linux, CRIU is used; on macOS, gcore is used.
-fn take_memory_snapshot(pid: u32, dump_dir: &Path) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        fs::create_dir_all(dump_dir)?;
-        let status = Command::new("criu")
-            .args(&[
-                "dump",
-                "-t",
-                &pid.to_string(),
-                "-D",
-                dump_dir.to_str().unwrap(),
-                "--shell-job",
-                "--leave-running",
-            ])
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(anyhow!("CRIU dump failed"))
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        fs::create_dir_all(dump_dir)?;
-        let snapshot_file = dump_dir.join(format!("core.{}", pid));
-        let status = Command::new("gcore")
-            .args(&["-o", snapshot_file.to_str().unwrap(), &pid.to_string()])
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(anyhow!("gcore snapshot failed"))
-        }
-    }
 }
 
 /// Main function tying all steps together.
@@ -252,26 +217,84 @@ pub fn main() -> Result<()> {
     let mut child = spawn_python_loader(&modules)?;
 
     // 3. Read stdout until we see "IMPORTS_LOADED".
-    if let Some(stdout) = child.stdout.take() {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            let line = line?;
+    let stdout = child.stdout.take()
+        .ok_or_else(|| anyhow!("Failed to capture stdout from python process"))?;
+    let mut stdin = child.stdin.take()
+        .ok_or_else(|| anyhow!("Failed to capture stdin for python process"))?;
+    
+    let reader = BufReader::new(stdout);
+    let mut lines = reader.lines();
+    
+    // Wait for imports to complete
+    loop {
+        if let Some(Ok(line)) = lines.next() {
             println!("Python process: {}", line);
             if line.trim() == "IMPORTS_LOADED" {
                 break;
             }
+        } else {
+            return Err(anyhow!("Python process terminated unexpectedly before imports completed"));
         }
-    } else {
-        return Err(anyhow!("Failed to capture stdout from python process"));
     }
 
-    // 4. Take a memory snapshot of the running Python process.
-    let pid = child.id();
-    let dump_dir = Path::new("./python_memory_snapshot");
-    println!("Taking memory snapshot of process {} into {:?}", pid, dump_dir);
-    take_memory_snapshot(pid, dump_dir)?;
-
-    println!("Memory snapshot successfully saved.");
-    child.kill()?;
+    // 4. Demonstrate forking and executing code
+    println!("Sending code to first child process...");
+    writeln!(stdin, "FORK:print('Hello from child process 1')")
+        .map_err(|e| anyhow!("Failed to write to stdin: {}", e))?;
+    
+    // Wait for response from the fork
+    let mut fork_complete = false;
+    while !fork_complete {
+        if let Some(Ok(line)) = lines.next() {
+            println!("Python process: {}", line);
+            if line.starts_with("FORKED:") {
+                // Successfully forked
+                let fork_pid = line.trim_start_matches("FORKED:");
+                println!("Forked child process with PID: {}", fork_pid);
+            } else if line.starts_with("FORK_COMPLETE:") {
+                fork_complete = true;
+            } else if line.starts_with("FORK_ERROR:") {
+                return Err(anyhow!("Error in child process: {}", 
+                    line.trim_start_matches("FORK_ERROR:")));
+            }
+        } else {
+            return Err(anyhow!("Python process terminated unexpectedly during first fork"));
+        }
+    }
+    
+    // Sleep briefly to ensure first process completes
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    
+    // 5. Launch a second child process
+    println!("Sending code to second child process...");
+    writeln!(stdin, "FORK:print('Hello from child process 2')")
+        .map_err(|e| anyhow!("Failed to write to stdin: {}", e))?;
+    
+    // Wait for response from the second fork
+    fork_complete = false;
+    while !fork_complete {
+        if let Some(Ok(line)) = lines.next() {
+            println!("Python process: {}", line);
+            if line.starts_with("FORKED:") {
+                // Successfully forked
+                let fork_pid = line.trim_start_matches("FORKED:");
+                println!("Forked second child process with PID: {}", fork_pid);
+            } else if line.starts_with("FORK_COMPLETE:") {
+                fork_complete = true;
+            } else if line.starts_with("FORK_ERROR:") {
+                return Err(anyhow!("Error in second child process: {}", 
+                    line.trim_start_matches("FORK_ERROR:")));
+            }
+        } else {
+            return Err(anyhow!("Python process terminated unexpectedly during second fork"));
+        }
+    }
+    
+    // 6. Clean up
+    println!("Demo complete. Terminating Python process.");
+    writeln!(stdin, "EXIT")
+        .map_err(|e| anyhow!("Failed to write exit command: {}", e))?;
+    
+    child.wait()?;
     Ok(())
 }
