@@ -152,15 +152,21 @@ fn process_py_files(path: &Path) -> Result<(HashSet<String>, Option<String>)> {
     let mut third_party_modules = HashSet::new();
     let package_name = detect_package_name(path);
 
+    // For now assume that the package name is the directory name
+    // TODO: More generic support for pointing to the package where we want to sniff
+    // it for imports.
+    let package_path = path.join(package_name.clone().unwrap_or_default());
+
     println!("Detected package name: {:?}", package_name);
 
-    for entry in WalkDir::new(path)
+    for entry in WalkDir::new(package_path)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| {
             e.file_type().is_file() && e.path().extension().map(|ext| ext == "py").unwrap_or(false)
         })
     {
+        println!("Processing file: {}", entry.path().display());
         let file_path = entry.path();
         let source = fs::read_to_string(file_path)?;
         let parsed = parse(&source, Mode::Module, file_path.to_string_lossy().as_ref())
@@ -183,6 +189,7 @@ fn process_py_files(path: &Path) -> Result<(HashSet<String>, Option<String>)> {
                     .as_ref()
                     .map_or(false, |pkg| imp.module.starts_with(pkg))
             {
+                println!("Adding module: {}", imp.module);
                 third_party_modules.insert(imp.module);
             }
         }
@@ -198,10 +205,12 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
     let mut import_lines = String::new();
     for module in modules {
         import_lines.push_str(&format!(
-            "try:\n    __import__('{}')\nexcept ImportError as e:\n    print('Failed to import {}:', e)\n",
-            module, module
+            "__import__('{}')\n",
+            module
         ));
     }
+
+    println!("Import lines: {}", import_lines);
 
     // Write the embedded loader script to a file in the /tmp directory
     println!("Writing Python loader script to /tmp directory");
@@ -281,8 +290,9 @@ fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
                 }
                 Message::ImportError(error) => {
                     return Err(PyRuntimeError::new_err(format!(
-                        "Import error: {}",
-                        error.error
+                        "Import error: {}: {}",
+                        error.error,
+                        error.traceback.unwrap_or_default()
                     )));
                 }
                 _ => {
@@ -350,6 +360,7 @@ fn exec_isolated<'py>(
     locals.set_item("func", func)?;
     locals.set_item("args", args.unwrap_or_else(|| py.None()))?;
 
+    println!("Running call serializer: {}", PYTHON_CALL_SCRIPT);
     py.run(PYTHON_CALL_SCRIPT, None, Some(locals))?;
 
     let func_module_path = locals

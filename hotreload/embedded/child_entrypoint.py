@@ -18,7 +18,7 @@ pickled_str: str
 
 # If we have a module path, import it first to ensure the function is available
 if module_path != "null":
-    print(f"Importing module: {{module_path}}")
+    print(f"Importing module: {module_path}")
     # Try to import the module or reload it if already imported
     if module_path in sys.modules:
         importlib.reload(sys.modules[module_path])
@@ -26,7 +26,7 @@ if module_path != "null":
         importlib.import_module(module_path)
 elif file_path != "null" and os.path.exists(file_path):
     # For ad-hoc files that aren't part of a module
-    print(f"Importing ad-hoc file: {{file_path}}")
+    print(f"Importing ad-hoc file: {file_path}")
     
     # Get the directory and filename for the ad-hoc file
     file_dir = os.path.dirname(os.path.abspath(file_path))
