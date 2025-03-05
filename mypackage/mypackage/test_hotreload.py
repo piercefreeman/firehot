@@ -38,8 +38,9 @@ def main():
     package_path = str(Path(".").absolute())
     runner_name = "test_hotreload"
     
+    start = time.time()
     with isolate_imports(package_path) as runner:
-        print(f"{runner_name}: Imports have been loaded in an isolated process")
+        print(f"{runner_name}: Imports have been loaded in an isolated process in {time.time() - start}s")
         
         # Execute a function in the forked process
         print(f"\n{runner_name}: Executing function in forked process...")

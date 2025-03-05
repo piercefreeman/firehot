@@ -360,7 +360,6 @@ fn exec_isolated<'py>(
     locals.set_item("func", func)?;
     locals.set_item("args", args.unwrap_or_else(|| py.None()))?;
 
-    println!("Running call serializer: {}", PYTHON_CALL_SCRIPT);
     py.run(PYTHON_CALL_SCRIPT, None, Some(locals))?;
 
     let func_module_path = locals

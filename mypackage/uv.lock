@@ -4,14 +4,14 @@ requires-python = ">=3.12"
 [[package]]
 name = "external-package"
 version = "0.1.0"
-source = { directory = "external-package" }
+source = { editable = "external-package" }
 
 [[package]]
 name = "hotreload"
 version = "0.1.0"
 source = { path = "../target/wheels/hotreload-0.1.0-cp312-cp312-macosx_11_0_arm64.whl" }
 wheels = [
-    { filename = "hotreload-0.1.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:68b5f11e7942a36ba5dc0643bce766138c3ce9de98e204111814e2877d04333e" },
+    { filename = "hotreload-0.1.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:b2d19c99fa1c13a63a81b96a040b553994c44b6f9b57b66f99e74fa5506e9494" },
 ]
 
 [[package]]
@@ -25,6 +25,6 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "external-package", directory = "external-package" },
+    { name = "external-package", editable = "external-package" },
     { name = "hotreload", path = "../target/wheels/hotreload-0.1.0-cp312-cp312-macosx_11_0_arm64.whl" },
 ]

@@ -110,7 +110,7 @@ pickled_str = "{}"
                 }
             } else {
                 // If we can't parse it as a message, log and continue
-                println!("Received non-message line: {}", line);
+                println!("[python stdout]: {}", line);
             }
         }
         
@@ -171,12 +171,9 @@ pickled_str = "{}"
             .map_err(|e| format!("Failed to lock reader mutex: {}", e))?;
             
         // Check for messages from the process
-        let mut output = String::new();
         for _ in 0..1000 { // Limit to avoid infinite loop
-            println!("Reading line");
             match reader_guard.next() {
                 Some(Ok(line)) => {
-                    println!("Read line: {}", line);
                     // Parse the line as a message
                     if let Ok(message) = serde_json::from_str::<Message>(&line) {
                         match message {
@@ -194,13 +191,14 @@ pickled_str = "{}"
                                 // For other message types, add them to the output
                                 let json = serde_json::to_string(&message)
                                     .map_err(|e| format!("Failed to serialize message: {}", e))?;
-                                output.push_str(&json);
-                                output.push('\n');
+                                /*output.push_str(&json);
+                                output.push('\n');*/
+                                println!("[hotreload]: Unhandled message type: {}", json);
                             }
                         }
                     } else {
                         // Log unrecognized output but don't add it to the result
-                        println!("Unrecognized output from process: {}", line);
+                        println!("[python stdout]: {}", line);
                     }
                 },
                 Some(Err(e)) => return Err(format!("Error reading output: {}", e)),
@@ -208,11 +206,7 @@ pickled_str = "{}"
             }
         }
         
-        if output.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(output))
-        }
+        Ok(None)
     }
 
     pub fn stop_main(&self) -> Result<bool, String> {
