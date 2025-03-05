@@ -2,6 +2,20 @@
 
 A POC package to quickly hot reload large Python projects.
 
+## POC
+
+Eventually the rust logic will be executable in Python. For now you can run the Rust project directly:
+
+```bash
+# Build and run the binary with Cargo
+cargo run -- <path_to_scan>
+
+# Or build the binary and run it separately
+cargo build --release
+./target/release/hotreload <path_to_scan>
+```
+
+
 ## Installation
 
 ### Development Installation
