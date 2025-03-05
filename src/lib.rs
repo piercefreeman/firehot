@@ -29,6 +29,12 @@ use libc;
 pub mod messages;
 use messages::{ForkRequest, ExitRequest, Message};
 
+
+// Embed Python scripts directly in the binary
+const PYTHON_LOADER_SCRIPT: &str = include_str!("../python/parent_entrypoint.py");
+const PYTHON_CHILD_SCRIPT: &str = include_str!("../python/child_entrypoint.py");
+const PYTHON_CALL_SCRIPT: &str = include_str!("../python/call_serializer.py");
+
 /// A simple structure to hold information about an import.
 #[derive(Debug)]
 struct ImportInfo {
@@ -184,9 +190,6 @@ fn process_py_files(path: &Path) -> Result<(HashSet<String>, Option<String>)> {
     Ok((third_party_modules, package_name))
 }
 
-// Embed the Python loader script directly in the binary
-const PYTHON_LOADER_SCRIPT: &str = include_str!("../python/parent_entrypoint.py");
-
 /// Spawn a Python process that imports the given modules and then waits for commands on stdin.
 /// The Python process prints "IMPORTS_LOADED" to stdout once all imports are complete.
 /// After that, it will listen for commands on stdin, which can include fork requests and code to execute.
@@ -243,61 +246,16 @@ impl ImportRunner {
         // Errors don't seem to get caught in the parent process, so we need to log them here
         let exec_code = format!(
             r#"
-import pickle
-import base64
-import importlib
-import sys
-from traceback import format_exc
-
 module_path = "{}"
 file_path = "{}"
+pickled_str = "{}"
 
-print("MODULE PATH", module_path)
-print("FILE PATH", file_path)
-
-# If we have a module path, import it first to ensure the function is available
-if module_path != "null":
-    print(f"Importing module: {{module_path}}")
-    # Try to import the module or reload it if already imported
-    if module_path in sys.modules:
-        importlib.reload(sys.modules[module_path])
-    else:
-        importlib.import_module(module_path)
-        
-    # Get the function from its module
-    if hasattr(func, "__qualname__"):
-        func_name = func.__qualname__
-        module = sys.modules[module_path]
-        
-        # Try to get the function from the module
-        # This handles nested functions by traversing the object hierarchy
-        parts = func_name.split('.')
-        current = module
-        for part in parts:
-            if hasattr(current, part):
-                current = getattr(current, part)
-            else:
-                raise AttributeError(f"Cannot find {{part}} in {{current}}")
-        
-        # Use the function from the module instead of the pickled one
-        func = current
-
-# Decode base64 and unpickle
-pickled_bytes = base64.b64decode("{}")
-data = pickle.loads(pickled_bytes)
-func, args = data
-
-# Run the function with args
-if isinstance(args, tuple):
-    result = func(*args)
-elif args is not None:
-    result = func(args)
-else:
-    result = func()
+{}
             "#, 
             module_path,
             file_path,
-            pickled_data
+            pickled_data,
+            PYTHON_CHILD_SCRIPT,
         );
         
         // Send the code to the forked process
@@ -579,35 +537,7 @@ fn exec_isolated<'py>(py: Python<'py>, runner_id: &str, func: PyObject, args: Op
     locals.set_item("func", func)?;
     locals.set_item("args", args.unwrap_or_else(|| py.None()))?;
     
-    // Get the module path of the function
-    let get_module_code = r#"
-import inspect, sys, os.path
-
-def get_func_module_path(func):
-    print("Inspecting func", func)
-    if hasattr(func, '__module__'):
-        module_name = func.__module__
-        if module_name != '__main__':
-            return module_name, None
-        else:
-            # Handle functions from directly executed scripts
-            try:
-                # Get the file where the function is defined
-                file_path = inspect.getfile(func)
-                if file_path and os.path.exists(file_path):
-                    # Store the file path in a separate variable
-                    return None, file_path
-            except (TypeError, ValueError):
-                pass
-    return None, None
-
-# Final string conversions, expected output values
-func_module_path_raw, func_file_path_raw = get_func_module_path(func)
-func_module_path = func_module_path_raw if func_module_path_raw is not None else "null"
-func_file_path = func_file_path_raw if func_file_path_raw is not None else "null"
-"#;
-    
-    py.run(get_module_code, None, Some(locals))?;
+    py.run(PYTHON_CALL_SCRIPT, None, Some(locals))?;
 
     let func_module_path = locals.get_item("func_module_path")
         .ok_or_else(|| PyRuntimeError::new_err("Failed to get function module path"))?
