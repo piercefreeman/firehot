@@ -13,7 +13,7 @@ dependencies = [
 
 [tool.uv.sources]
 external_package = { path = "./external-package" }
-hotreload = { path = "../hotreload" }
+hotreload = { path = "../" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["mypackage"]

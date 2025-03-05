@@ -12,6 +12,7 @@ Run this with:
 
 import asyncio
 import time
+from pathlib import Path
 from hotreload import isolate_imports
 
 # A global function to demonstrate execution in a forked process
@@ -35,12 +36,12 @@ def global_fn(msg: str, count: int) -> str:
 async def main() -> None:
     """Main example function demonstrating the requested API."""
     # Path to the package to isolate imports for
-    package_path = "."  # Current directory, adjust as needed
+    package_path = str(Path(".").absolute())  # Current directory, adjust as needed
     
     print("Starting with isolate_imports context manager...")
     
     # Use the context manager as specified in the API request
-    async with isolate_imports(package_path) as runner:
+    with isolate_imports(package_path) as runner:
         print("Imports have been loaded in an isolated process")
         
         # Wait for a bit as specified in the requested API

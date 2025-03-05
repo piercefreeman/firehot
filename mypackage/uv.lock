@@ -1,0 +1,38 @@
+version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "external-package"
+version = "0.1.0"
+source = { directory = "external-package" }
+
+[[package]]
+name = "hotreload"
+version = "0.1.0"
+source = { directory = "../" }
+
+[package.metadata]
+requires-dist = [
+    { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
+    { name = "isort", marker = "extra == 'dev'", specifier = ">=5.12.0" },
+    { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.0,<2.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.0.292" },
+]
+
+[[package]]
+name = "mypackage"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "external-package" },
+    { name = "hotreload" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "external-package", directory = "external-package" },
+    { name = "hotreload", directory = "../" },
+]

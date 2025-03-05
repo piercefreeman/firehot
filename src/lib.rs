@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use std::{
     collections::HashSet,
     fs,
-    io::{BufRead, BufReader, Write, Read},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
 };
@@ -17,10 +17,10 @@ use rustpython_parser::ast::{
 // Add PyO3 imports for Python bindings
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
-use pyo3::types::{PyBytes, PyDict, PyFunction};
+use pyo3::types::{PyBytes, PyDict};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::sync::Lazy;
+use once_cell::sync::Lazy;
 
 /// A simple structure to hold information about an import.
 #[derive(Debug)]
@@ -213,7 +213,7 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
 struct ImportRunner {
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<std::process::ChildStdin>>,
-    reader: Arc<Mutex<BufReader<std::process::ChildStdout>>>,
+    reader: Arc<Mutex<std::io::Lines<BufReader<std::process::ChildStdout>>>>,
 }
 
 #[pymethods]
@@ -238,7 +238,7 @@ impl ImportRunner {
         // Get the pickled data
         let pickled_data = locals.get_item("pickled_data")
             .ok_or_else(|| PyRuntimeError::new_err("Failed to pickle function and args"))?;
-        let pickled_bytes = pickled_data.downcast::<PyBytes>()
+        let _pickled_bytes = pickled_data.downcast::<PyBytes>()
             .map_err(|_| PyRuntimeError::new_err("Pickled data is not bytes"))?;
         
         // Create the Python execution code that will unpickle and run the function
@@ -272,10 +272,11 @@ else:
         
         // Wait for response
         let mut reader_guard = self.reader.lock()
-            .map_err(|_| PyRuntimeError::new_err("Failed to lock reader mutex"))?;
+    .map_err(|_| PyRuntimeError::new_err("Failed to lock reader mutex"))?;
+
         
-        for line in (&mut *reader_guard).lines() {
-            let line = line.map_err(|e| PyRuntimeError::new_err(format!("Failed to read line: {}", e)))?;
+    for line in &mut *reader_guard {
+        let line = line.map_err(|e| PyRuntimeError::new_err(format!("Failed to read line: {}", e)))?;
             
             if line.starts_with("FORKED:") {
                 let fork_pid = line[7..].parse::<i32>()
@@ -311,7 +312,7 @@ fn hotreload(_py: Python, m: &PyModule) -> PyResult<()> {
     // Register the module functions
     m.add_function(wrap_pyfunction!(start_import_runner, m)?)?;
     m.add_function(wrap_pyfunction!(stop_import_runner, m)?)?;
-    m.add_function(wrap_pyfunction!(isolate_imports, m)?)?;
+    // m.add_function(wrap_pyfunction!(isolate_imports, m)?)?;
     
     Ok(())
 }
@@ -358,14 +359,14 @@ fn start_import_runner(py: Python, package_path: &str) -> PyResult<()> {
         return Err(PyRuntimeError::new_err("Python loader did not report successful imports"));
     }
     
-    // Create a new reader from the remaining content
-    let reader = BufReader::new(stdout);
+    // Create the runner object with the existing reader instead of trying to create a new one
+    //let reader = lines_iter.into_iter();
     
     // Create the runner object
     let runner = ImportRunner {
         child: Arc::new(Mutex::new(child)),
         stdin: Arc::new(Mutex::new(stdin)),
-        reader: Arc::new(Mutex::new(reader)),
+        reader: Arc::new(Mutex::new(lines_iter)),
     };
     
     // Store in global storage
@@ -390,7 +391,7 @@ fn stop_import_runner(_py: Python) -> PyResult<()> {
 }
 
 /// Function to isolate imports
-#[pyfunction]
+/*#[pyfunction]
 fn isolate_imports(py: Python, package_path: &str) -> PyResult<PyObject> {
     // First, ensure we have a runner available
     {
@@ -412,7 +413,7 @@ fn isolate_imports(py: Python, package_path: &str) -> PyResult<PyObject> {
     module.add("importlib", importlib)?;
     
     Ok(module.into())
-}
+}*/
 
 /// Main function tying all steps together.
 pub fn main() -> Result<()> {

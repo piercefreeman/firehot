@@ -2,6 +2,30 @@
 
 A POC package to quickly hot reload large Python projects.
 
+```bash
+cd mypackage
+uv run python test_hotreload.py
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ## POC
 
 Eventually the rust logic will be executable in Python. For now you can run the Rust project directly:
