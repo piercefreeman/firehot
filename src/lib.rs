@@ -24,6 +24,9 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use libc;
 
+// Define our messages module
+pub mod messages;
+
 /// A simple structure to hold information about an import.
 #[derive(Debug)]
 struct ImportInfo {
