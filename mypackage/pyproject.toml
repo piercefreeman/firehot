@@ -11,10 +11,14 @@ dependencies = [
     "external_package"
 ]
 
+[project.scripts]
+test-hotreload = "mypackage.test_hotreload:main"
+
 [tool.uv.sources]
 external_package = { path = "./external-package" }
 # hotreload = { path = "../" }
 hotreload = { path = "../target/wheels/hotreload-0.1.0-cp312-cp312-macosx_11_0_arm64.whl"}
+
 
 [tool.hatch.build.targets.wheel]
 packages = ["mypackage"]

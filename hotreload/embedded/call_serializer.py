@@ -7,14 +7,16 @@ without sub-functions.
 
 """
 from typing import Callable
+import pickle
+import base64
 import inspect
 import os.path
 
 # This will be passed in from rust
 func: Callable
+args: tuple | None
 
 func_module_path_raw = None
-func_file_path_raw = None
 
 if hasattr(func, '__module__'):
     module_name = func.__module__
@@ -25,12 +27,11 @@ if hasattr(func, '__module__'):
         try:
             # Get the file where the function is defined
             file_path = inspect.getfile(func)
-            if file_path and os.path.exists(file_path):
-                # Store the file path in a separate variable
-                func_file_path_raw = file_path
+            raise Exception(f"Function belongs to script, currently only modules are supported: {file_path}")
         except (TypeError, ValueError):
             pass
 
 # Final string conversions, expected output values
 func_module_path = func_module_path_raw if func_module_path_raw is not None else "null"
-func_file_path = func_file_path_raw if func_file_path_raw is not None else "null"
+
+pickled_data = base64.b64encode(pickle.dumps((func, args))).decode('utf-8')

@@ -32,7 +32,6 @@ impl ImportRunner {
     pub fn exec_isolated(
         &self, 
         module_path: &str,
-        file_path: &str,
         pickled_data: &str
     ) -> Result<String, String> {
         // Create the Python execution code that will unpickle and run the function
@@ -40,13 +39,11 @@ impl ImportRunner {
         let exec_code = format!(
             r#"
 module_path = "{}"
-file_path = "{}"
 pickled_str = "{}"
 
 {}
             "#, 
             module_path,
-            file_path,
             pickled_data,
             PYTHON_CHILD_SCRIPT,
         );

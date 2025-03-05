@@ -34,7 +34,7 @@ cd mypackage
 (cd .. && uv run maturin build)
 rm uv.lock
 uv sync
-uv run python test_hotreload.py
+uv run test-hotreload
 ```
 
 ## Unit tests

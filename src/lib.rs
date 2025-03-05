@@ -368,15 +368,6 @@ fn exec_isolated<'py>(
         .ok_or_else(|| PyRuntimeError::new_err("Failed to get function module path"))?
         .extract::<String>()?;
 
-    let func_file_path = locals
-        .get_item("func_file_path")
-        .ok_or_else(|| PyRuntimeError::new_err("Failed to get function file path"))?
-        .extract::<String>()?;
-
-    // Pickle the function, args, and module path and encode in base64
-    let pickle_code = "import pickle, base64; pickled_data = base64.b64encode(pickle.dumps((func, args, func_module_path))).decode('utf-8')";
-    py.run(pickle_code, None, Some(locals))?;
-
     // Get the pickled data - now it's a string because we decoded it in Python
     let pickled_data = locals
         .get_item("pickled_data")
@@ -386,7 +377,7 @@ fn exec_isolated<'py>(
     let runners = IMPORT_RUNNERS.lock().unwrap();
     if let Some(runner) = runners.get(runner_id) {
         // Convert Rust Result<String, String> to PyResult
-        match runner.exec_isolated(&func_module_path, &func_file_path, &pickled_data) {
+        match runner.exec_isolated(&func_module_path, &pickled_data) {
             Ok(result) => Ok(py.eval(&format!("'{}'", result), None, None)?),
             Err(err) => Err(PyRuntimeError::new_err(err)),
         }

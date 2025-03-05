@@ -28,15 +28,12 @@ def global_fn(msg: str, count: int) -> str:
     Returns:
         str: A completion message
     """
-    with open("test.txt", "w") as f:
-        f.write(f"Running in forked process with PID: {__import__('os').getpid()}")
-
     for i in range(count):
         print(f"{i+1}: {msg}")
         time.sleep(0.5)
     return f"Completed {count} iterations"
 
-async def main() -> None:
+def main():
     """Run tasks with a specific runner."""
     package_path = str(Path(".").absolute())
     runner_name = "test_hotreload"
@@ -62,6 +59,3 @@ async def main() -> None:
         result = runner.communicate_isolated(result)
         print(f"{runner_name} final result: {result}")
 
-
-if __name__ == "__main__":
-    asyncio.run(main()) 
