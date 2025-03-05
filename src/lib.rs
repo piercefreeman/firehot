@@ -177,6 +177,9 @@ fn process_py_files(path: &Path) -> Result<(HashSet<String>, Option<String>)> {
     Ok((third_party_modules, package_name))
 }
 
+// Embed the Python loader script directly in the binary
+const PYTHON_LOADER_SCRIPT: &str = include_str!("../python/loader.py");
+
 /// Spawn a Python process that imports the given modules and then waits for commands on stdin.
 /// The Python process prints "IMPORTS_LOADED" to stdout once all imports are complete.
 /// After that, it will listen for commands on stdin, which can include fork requests and code to execute.
@@ -190,15 +193,15 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
         ));
     }
     
-    // Path to the Python loader script
-    let loader_script_path = Path::new("python/loader.py");
-    if !loader_script_path.exists() {
-        return Err(anyhow!("Python loader script not found at: {:?}", loader_script_path));
-    }
+    // Write the embedded loader script to a file in the /tmp directory
+    println!("Writing Python loader script to /tmp directory");
+    let temp_path = std::path::Path::new("/tmp").join(format!("hotreload_loader_{}.py", std::process::id()));
+    std::fs::write(&temp_path, PYTHON_LOADER_SCRIPT.as_bytes())
+        .map_err(|e| anyhow!("Failed to write Python loader script to /tmp file: {}", e))?;
     
     // Launch the Python process with the loader script
     let child = Command::new("python")
-        .arg(loader_script_path)
+        .arg(&temp_path)
         .arg(import_lines)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -390,7 +393,6 @@ fn stop_import_runner(_py: Python) -> PyResult<()> {
     Ok(())
 }
 
-/// Function to isolate imports
 /*#[pyfunction]
 fn isolate_imports(py: Python, package_path: &str) -> PyResult<PyObject> {
     // First, ensure we have a runner available
@@ -413,7 +415,7 @@ fn isolate_imports(py: Python, package_path: &str) -> PyResult<PyObject> {
     module.add("importlib", importlib)?;
     
     Ok(module.into())
-}*/
+}
 
 /// Main function tying all steps together.
 pub fn main() -> Result<()> {
@@ -512,4 +514,4 @@ pub fn main() -> Result<()> {
     
     child.wait()?;
     Ok(())
-}
+}*/

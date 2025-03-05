@@ -4,8 +4,11 @@ A POC package to quickly hot reload large Python projects.
 
 ```bash
 cd mypackage
+(cd .. && uv run maturin build)
+uv sync
 uv run python test_hotreload.py
 ```
+
 
 
 
