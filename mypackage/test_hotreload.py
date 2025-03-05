@@ -56,9 +56,11 @@ async def main() -> None:
         # Wait 5s
         # Then communicate with the forked process
         # And print the output
-        time.sleep(5)
+        print("Waiting 2s for results...")
+        time.sleep(2)
+        print("Communicating with the forked process...")
         result = runner.communicate_isolated(result)
-        print(f"{runner_name} result: {result}")
+        print(f"{runner_name} final result: {result}")
 
 
 if __name__ == "__main__":

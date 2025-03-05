@@ -1,11 +1,15 @@
 use anyhow::{anyhow, Result};
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
+    io::{BufRead, BufReader},
+    path::Path,
     process::{Child, Command, Stdio},
+    collections::{HashMap, HashSet},
+    time::Duration,
 };
 use walkdir::WalkDir;
+use once_cell::sync::Lazy;
+use std::io::Write;
 
 use rustpython_parser::{parse, Mode};
 use rustpython_parser::ast::{
@@ -16,17 +20,14 @@ use rustpython_parser::ast::{
 // Add PyO3 imports for Python bindings
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::PyDict;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use once_cell::sync::Lazy;
-use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use libc;
 
 // Define our messages module
 pub mod messages;
-use messages::{ForkRequest, ForkResponse, ChildError, UnknownError};
+use messages::{ForkRequest, ExitRequest, Message};
 
 /// A simple structure to hold information about an import.
 #[derive(Debug)]
@@ -237,13 +238,15 @@ impl ImportRunner {
         pickled_data: &str
     ) -> Result<String, String> {
         // Create the Python execution code that will unpickle and run the function
+        // Errors don't seem to get caught in the parent process, so we need to log them here
         let exec_code = format!(
             r#"
 import pickle
 import base64
+from traceback import format_exc
 
 # Decode base64 and unpickle
-pickled_bytes = base64.b64decode({})
+pickled_bytes = base64.b64decode("{}")
 data = pickle.loads(pickled_bytes)
 func, args = data
 
@@ -254,8 +257,6 @@ elif args is not None:
     result = func(args)
 else:
     result = func()
-
-print("RAN RESULT")
             "#, 
             pickled_data
         );
@@ -264,9 +265,13 @@ print("RAN RESULT")
         let mut stdin_guard = self.stdin.lock()
             .map_err(|e| format!("Failed to lock stdin mutex: {}", e))?;
         
-        // Create a ForkRequest message instead of raw string
-        let fork_request = ForkRequest::new(exec_code);
-        messages::io::write_message(&mut stdin_guard, &fork_request)
+        // Create a ForkRequest message
+        let fork_request = Message::ForkRequest(ForkRequest::new(exec_code));
+        let serialized = serde_json::to_string(&fork_request)
+            .map_err(|e| format!("Failed to serialize message: {}", e))?;
+        
+            println!("Sending message: {}", serialized);
+        writeln!(stdin_guard, "{}", serialized)
             .map_err(|e| format!("Failed to write to child process: {}", e))?;
         
         drop(stdin_guard);
@@ -278,8 +283,10 @@ print("RAN RESULT")
         for line in &mut *reader_guard {
             let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
             
-            // Try to parse the line as a message
-            if let Ok(Some(message)) = serde_json::from_str::<messages::Message>(&line) {
+            // Parse the line as a message
+            if let Ok(message) = serde_json::from_str::<messages::Message>(&line) {
+                println!("Received message: {:?}", message);
+
                 match message {
                     messages::Message::ForkResponse(response) => {
                         // Handle fork response message
@@ -309,10 +316,14 @@ print("RAN RESULT")
                         return Err(format!("Process error: {}", error.error));
                     },
                     _ => {
-                        // Ignore other message types
+                        // Log unhandled message types
+                        println!("Unhandled message type: {:?}", message.name());
                         continue;
                     }
                 }
+            } else {
+                // If we can't parse it as a message, log and continue
+                println!("Received non-message line: {}", line);
             }
         }
         
@@ -331,7 +342,9 @@ print("RAN RESULT")
             
             // Create an ExitRequest message
             let exit_request = messages::ExitRequest::new();
-            messages::io::write_message(&mut stdin_guard, &exit_request)
+            let serialized = serde_json::to_string(&exit_request)
+                .map_err(|e| format!("Failed to serialize message: {}", e))?;
+            writeln!(stdin_guard, "{}", serialized)
                 .map_err(|e| format!("Failed to write exit request: {}", e))?;
             drop(stdin_guard);
             
@@ -370,13 +383,15 @@ print("RAN RESULT")
         let mut reader_guard = self.reader.lock()
             .map_err(|e| format!("Failed to lock reader mutex: {}", e))?;
             
-        // Check if there's any output available (non-blocking)
+        // Check for messages from the process
         let mut output = String::new();
-        for _ in 0..10 { // Try reading up to 10 lines (limit to avoid infinite loop)
+        for _ in 0..1000 { // Limit to avoid infinite loop
+            println!("Reading line");
             match reader_guard.next() {
                 Some(Ok(line)) => {
-                    // Try to parse the line as a message
-                    if let Ok(Some(message)) = serde_json::from_str::<messages::Message>(&line) {
+                    println!("Read line: {}", line);
+                    // Parse the line as a message
+                    if let Ok(message) = serde_json::from_str::<messages::Message>(&line) {
                         match message {
                             messages::Message::ChildComplete(complete) => {
                                 // If we have a result, return it
@@ -397,9 +412,8 @@ print("RAN RESULT")
                             }
                         }
                     } else {
-                        // Fallback for non-message lines
-                        output.push_str(&line);
-                        output.push('\n');
+                        // Log unrecognized output but don't add it to the result
+                        println!("Unrecognized output from process: {}", line);
                     }
                 },
                 Some(Err(e)) => return Err(format!("Error reading output: {}", e)),
@@ -430,12 +444,12 @@ fn hotreload(_py: Python, m: &PyModule) -> PyResult<()> {
 
 /// Initialize and start the import runner, returning a unique identifier
 #[pyfunction]
-fn start_import_runner(py: Python, package_path: &str) -> PyResult<String> {
+fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
     // Process Python files
     let (modules, package_name) = process_py_files(Path::new(package_path))
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to process Python files: {}", e)))?;
     
-    let package_name = package_name.ok_or_else(|| 
+    let _package_name = package_name.ok_or_else(|| 
         PyRuntimeError::new_err("Could not determine package name"))?;
     
     // Spawn Python subprocess to load modules
@@ -451,16 +465,33 @@ fn start_import_runner(py: Python, package_path: &str) -> PyResult<String> {
     let reader = BufReader::new(stdout);
     let mut lines_iter = reader.lines();
     
-    // Wait for the IMPORTS_LOADED message
+    // Wait for the ImportComplete message
     let mut imports_loaded = false;
     for line in &mut lines_iter {
         let line = line.map_err(|e| PyRuntimeError::new_err(format!("Failed to read line: {}", e)))?;
-        if line == "IMPORTS_LOADED" {
-            imports_loaded = true;
-            break;
+        
+        // Parse the line as a message
+        if let Ok(message) = serde_json::from_str::<Message>(&line) {
+            match message {
+                Message::ImportComplete(_) => {
+                    imports_loaded = true;
+                    break;
+                },
+                Message::ImportError(error) => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Import error: {}", 
+                        error.error
+                    )));
+                },
+                _ => {
+                    // Print other message types for debugging
+                    println!("Received message: {}", line);
+                }
+            }
+        } else {
+            // If we can't parse it as a message, log it
+            println!("Non-message output: {}", line);
         }
-        // Print any other messages (like import errors)
-        println!("{}", line);
     }
     
     if !imports_loaded {

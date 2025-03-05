@@ -34,8 +34,9 @@ class MessageBase:
 
 @dataclass
 class ForkRequest(MessageBase):
-    name: MessageType = MessageType.FORK_REQUEST
     code: str
+
+    name: MessageType = MessageType.FORK_REQUEST
 
 @dataclass
 class ExitRequest(MessageBase):
@@ -45,35 +46,42 @@ class ExitRequest(MessageBase):
 
 @dataclass
 class ForkResponse(MessageBase):
-    name: MessageType = MessageType.FORK_RESPONSE
     child_pid: int
+
+    name: MessageType = MessageType.FORK_RESPONSE
 
 @dataclass
 class ChildComplete(MessageBase):
-    name: MessageType = MessageType.CHILD_COMPLETE
     result: str | None
+
+    name: MessageType = MessageType.CHILD_COMPLETE
 
 @dataclass
 class ChildError(MessageBase):
-    name: MessageType = MessageType.CHILD_ERROR
     error: str
+    traceback: str | None
+
+    name: MessageType = MessageType.CHILD_ERROR
 
 @dataclass
 class UnknownCommandError(MessageBase):
-    name: MessageType = MessageType.UNKNOWN_COMMAND
     command: str
+
+    name: MessageType = MessageType.UNKNOWN_COMMAND
 
 @dataclass
 class UnknownError(MessageBase):
-    name: MessageType = MessageType.UNKNOWN_ERROR
     error: str
     traceback: str | None
 
+    name: MessageType = MessageType.UNKNOWN_ERROR
+
 @dataclass
 class ImportError(MessageBase):
-    name: MessageType = MessageType.IMPORT_ERROR
     error: str
     traceback: str | None
+
+    name: MessageType = MessageType.IMPORT_ERROR
 
 @dataclass
 class ImportComplete(MessageBase):
@@ -92,28 +100,30 @@ MESSAGES = {
 }
 
 def write_message(message: MessageBase):
-    print(f"{message.name}:{json_dumps(asdict(message))}", flush=True)
+    print(json_dumps(asdict(message)), flush=True)
 
 def read_message() -> MessageBase | None:
     line = sys.stdin.readline().strip()
     if not line:
         return None
 
-    payload = line.split(":", 1)
-    if len(payload) != 2:
-        print(f"ERROR: Invalid message format", flush=True)
+    # Try to parse it as a JSON object
+    try:
+        payload = json_loads(line)
+    except JSONDecodeError:
         return None
 
-    name, data = payload
+    # Get the name from the payload
+    name = payload.get("name")
+    if not name:
+        return None
 
     try:
         message_type = MessageType(name)
-        return MESSAGES[message_type](**json_loads(data))
-    except (ValueError, JSONDecodeError) as e:
-        # We expect these errors since they are likely due to another message (not intended for us)
-        # that has a colon in it
-        print(f"ERROR: {str(e)}", flush=True)
+    except ValueError:
         return None
+
+    return MESSAGES[message_type](**payload)
 
 #
 # Main Logic
@@ -144,8 +154,13 @@ def main():
                 exec_globals = globals().copy()
                 exec_locals = {}
                 
+                print("Will execute code in forked process...", flush=True)
+                print(code_to_execute, flush=True)
+
                 # Execute the code
                 exec(code_to_execute, exec_globals, exec_locals)
+
+                print("Executed code in forked process", flush=True)
                 
                 # By convention, the result is stored in the 'result' variable
                 if 'result' in exec_locals:

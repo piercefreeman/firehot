@@ -36,3 +36,9 @@ rm uv.lock
 uv sync
 uv run python test_hotreload.py
 ```
+
+## Unit tests
+
+```bash
+cargo test --lib messages::tests
+```

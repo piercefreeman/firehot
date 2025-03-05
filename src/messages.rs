@@ -23,7 +23,6 @@ pub trait MessageBase {
 /// Request to fork a process and execute code
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForkRequest {
-    pub name: MessageType,
     pub code: String,
 }
 
@@ -35,18 +34,13 @@ impl MessageBase for ForkRequest {
 
 impl ForkRequest {
     pub fn new(code: String) -> Self {
-        Self {
-            name: MessageType::ForkRequest,
-            code,
-        }
+        Self { code }
     }
 }
 
 /// Request to exit the process
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExitRequest {
-    pub name: MessageType,
-}
+pub struct ExitRequest {}
 
 impl MessageBase for ExitRequest {
     fn name(&self) -> MessageType {
@@ -56,16 +50,13 @@ impl MessageBase for ExitRequest {
 
 impl ExitRequest {
     pub fn new() -> Self {
-        Self {
-            name: MessageType::ExitRequest,
-        }
+        Self {}
     }
 }
 
 /// Response to a fork request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForkResponse {
-    pub name: MessageType,
     pub child_pid: i32,
 }
 
@@ -77,17 +68,13 @@ impl MessageBase for ForkResponse {
 
 impl ForkResponse {
     pub fn new(child_pid: i32) -> Self {
-        Self {
-            name: MessageType::ForkResponse,
-            child_pid,
-        }
+        Self { child_pid }
     }
 }
 
 /// Message indicating a child process has completed successfully
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildComplete {
-    pub name: MessageType,
     pub result: Option<String>,
 }
 
@@ -99,17 +86,13 @@ impl MessageBase for ChildComplete {
 
 impl ChildComplete {
     pub fn new(result: Option<String>) -> Self {
-        Self {
-            name: MessageType::ChildComplete,
-            result,
-        }
+        Self { result }
     }
 }
 
 /// Message indicating a child process has encountered an error
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildError {
-    pub name: MessageType,
     pub error: String,
 }
 
@@ -121,17 +104,13 @@ impl MessageBase for ChildError {
 
 impl ChildError {
     pub fn new(error: String) -> Self {
-        Self {
-            name: MessageType::ChildError,
-            error,
-        }
+        Self { error }
     }
 }
 
 /// Message indicating an unknown command was received
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnknownCommandError {
-    pub name: MessageType,
     pub command: String,
 }
 
@@ -143,17 +122,13 @@ impl MessageBase for UnknownCommandError {
 
 impl UnknownCommandError {
     pub fn new(command: String) -> Self {
-        Self {
-            name: MessageType::UnknownCommand,
-            command,
-        }
+        Self { command }
     }
 }
 
 /// Message indicating an unknown error occurred
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnknownError {
-    pub name: MessageType,
     pub error: String,
     pub traceback: Option<String>,
 }
@@ -166,18 +141,13 @@ impl MessageBase for UnknownError {
 
 impl UnknownError {
     pub fn new(error: String, traceback: Option<String>) -> Self {
-        Self {
-            name: MessageType::UnknownError,
-            error,
-            traceback,
-        }
+        Self { error, traceback }
     }
 }
 
 /// Message indicating an import error occurred
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportError {
-    pub name: MessageType,
     pub error: String,
     pub traceback: Option<String>,
 }
@@ -190,19 +160,13 @@ impl MessageBase for ImportError {
 
 impl ImportError {
     pub fn new(error: String, traceback: Option<String>) -> Self {
-        Self {
-            name: MessageType::ImportError,
-            error,
-            traceback,
-        }
+        Self { error, traceback }
     }
 }
 
 /// Message indicating an import was completed successfully
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImportComplete {
-    pub name: MessageType,
-}
+pub struct ImportComplete {}
 
 impl MessageBase for ImportComplete {
     fn name(&self) -> MessageType {
@@ -212,9 +176,7 @@ impl MessageBase for ImportComplete {
 
 impl ImportComplete {
     pub fn new() -> Self {
-        Self {
-            name: MessageType::ImportComplete,
-        }
+        Self {}
     }
 }
 
@@ -283,4 +245,70 @@ pub mod io {
         let message: Message = serde_json::from_str(&buffer)?;
         Ok(Some(message))
     }
-} 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_serialize_import_complete() {
+        // Wrap the inner struct in the Message enum so that the "name" tag is added.
+        let msg = Message::ImportComplete(ImportComplete::new());
+        let serialized = serde_json::to_string(&msg).unwrap();
+        println!("Serialized ImportComplete: {}", serialized);
+        // Expected output includes "IMPORT_COMPLETE" as the tag.
+        assert!(serialized.contains("IMPORT_COMPLETE"));
+    }
+
+    #[test]
+    fn test_deserialize_import_complete() {
+        // This is the exact format we're seeing from Python.
+        let json = r#"{"name": "IMPORT_COMPLETE"}"#;
+        let parsed: Result<Message, _> = serde_json::from_str(json);
+        assert!(parsed.is_ok(), "Failed to parse ImportComplete: {:?}", parsed.err());
+    }
+
+    #[test]
+    fn test_deserialize_message_enum() {
+        // This is the exact format we're seeing from Python.
+        let json = r#"{"name": "IMPORT_COMPLETE"}"#;
+        let parsed: Result<Message, _> = serde_json::from_str(json);
+        assert!(parsed.is_ok(), "Failed to parse Message enum: {:?}", parsed.err());
+        
+        if let Ok(message) = parsed {
+            match message {
+                Message::ImportComplete(_) => (), // Success
+                _ => panic!("Parsed to wrong variant: {:?}", message),
+            }
+        }
+    }
+
+    #[test]
+    fn test_deserialize_all_message_types() {
+        // Test ImportComplete
+        let json = r#"{"name": "IMPORT_COMPLETE"}"#;
+        let parsed: Result<Message, _> = serde_json::from_str(json);
+        assert!(parsed.is_ok(), "Failed to parse ImportComplete: {:?}", parsed.err());
+
+        // Test ForkRequest
+        let json = r#"{"name": "FORK_REQUEST", "code": "print('hello')"}"#;
+        let parsed: Result<Message, _> = serde_json::from_str(json);
+        assert!(parsed.is_ok(), "Failed to parse ForkRequest: {:?}", parsed.err());
+
+        // Test ForkResponse
+        let json = r#"{"name": "FORK_RESPONSE", "child_pid": 1234}"#;
+        let parsed: Result<Message, _> = serde_json::from_str(json);
+        assert!(parsed.is_ok(), "Failed to parse ForkResponse: {:?}", parsed.err());
+
+        // Test ChildComplete
+        let json = r#"{"name": "CHILD_COMPLETE", "result": "success"}"#;
+        let parsed: Result<Message, _> = serde_json::from_str(json);
+        assert!(parsed.is_ok(), "Failed to parse ChildComplete: {:?}", parsed.err());
+
+        // Test ChildError
+        let json = r#"{"name": "CHILD_ERROR", "error": "Something went wrong"}"#;
+        let parsed: Result<Message, _> = serde_json::from_str(json);
+        assert!(parsed.is_ok(), "Failed to parse ChildError: {:?}", parsed.err());
+    }
+}
