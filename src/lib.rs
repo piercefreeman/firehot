@@ -251,11 +251,11 @@ pub fn main() -> Result<()> {
                 // Successfully forked
                 let fork_pid = line.trim_start_matches("FORKED:");
                 println!("Forked child process with PID: {}", fork_pid);
-            } else if line.starts_with("FORK_COMPLETE:") {
+            } else if line.starts_with("FORK_RUN_COMPLETE:") {
                 fork_complete = true;
-            } else if line.starts_with("FORK_ERROR:") {
+            } else if line.starts_with("FORK_RUN_ERROR:") {
                 return Err(anyhow!("Error in child process: {}", 
-                    line.trim_start_matches("FORK_ERROR:")));
+                    line.trim_start_matches("FORK_RUN_ERROR:")));
             }
         } else {
             return Err(anyhow!("Python process terminated unexpectedly during first fork"));
@@ -279,11 +279,11 @@ pub fn main() -> Result<()> {
                 // Successfully forked
                 let fork_pid = line.trim_start_matches("FORKED:");
                 println!("Forked second child process with PID: {}", fork_pid);
-            } else if line.starts_with("FORK_COMPLETE:") {
+            } else if line.starts_with("FORK_RUN_COMPLETE:") {
                 fork_complete = true;
-            } else if line.starts_with("FORK_ERROR:") {
+            } else if line.starts_with("FORK_RUN_ERROR:") {
                 return Err(anyhow!("Error in second child process: {}", 
-                    line.trim_start_matches("FORK_ERROR:")));
+                    line.trim_start_matches("FORK_RUN_ERROR:")));
             }
         } else {
             return Err(anyhow!("Python process terminated unexpectedly during second fork"));

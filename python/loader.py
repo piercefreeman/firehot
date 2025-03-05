@@ -29,10 +29,10 @@ def main():
             try:
                 # Execute the code
                 exec(code_to_execute)
-                print(f"FORK_COMPLETE:{{}}", flush=True)
+                print(f"FORK_RUN_COMPLETE:{{}}", flush=True)
             except Exception as e:
                 error_msg = {{"error": str(e), "traceback": traceback.format_exc()}}
-                print(f"FORK_ERROR:{json.dumps(error_msg)}", flush=True)
+                print(f"FORK_RUN_ERROR:{json.dumps(error_msg)}", flush=True)
             finally:
                 # Exit the child process
                 sys.exit(0)
