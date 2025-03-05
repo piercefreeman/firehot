@@ -7,8 +7,9 @@ A POC package to quickly hot reload large Python projects.
 Eventually the rust logic will be executable in Python. For now you can run the Rust project directly:
 
 ```bash
-# Build and run the binary with Cargo
-cargo run -- <path_to_scan>
+# Build and run the binary with Cargo. We'll want to use `uv run` as a shortcut to run within the virtualenv
+# with the third party packages installed in the $PATH
+uv run cargo run -- hotreload
 
 # Or build the binary and run it separately
 cargo build --release
