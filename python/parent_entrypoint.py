@@ -155,7 +155,6 @@ def main():
                 exec_locals = {}
                 
                 print("Will execute code in forked process...", flush=True)
-                print(code_to_execute, flush=True)
 
                 # Execute the code
                 exec(code_to_execute, exec_globals, exec_locals)

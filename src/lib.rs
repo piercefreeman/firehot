@@ -235,6 +235,8 @@ impl ImportRunner {
     /// that spawned our hotreloader) so we can get the local function and closure variables.
     fn exec_isolated(
         &self, 
+        module_path: &str,
+        file_path: &str,
         pickled_data: &str
     ) -> Result<String, String> {
         // Create the Python execution code that will unpickle and run the function
@@ -243,7 +245,42 @@ impl ImportRunner {
             r#"
 import pickle
 import base64
+import importlib
+import sys
 from traceback import format_exc
+
+module_path = "{}"
+file_path = "{}"
+
+print("MODULE PATH", module_path)
+print("FILE PATH", file_path)
+
+# If we have a module path, import it first to ensure the function is available
+if module_path != "null":
+    print(f"Importing module: {{module_path}}")
+    # Try to import the module or reload it if already imported
+    if module_path in sys.modules:
+        importlib.reload(sys.modules[module_path])
+    else:
+        importlib.import_module(module_path)
+        
+    # Get the function from its module
+    if hasattr(func, "__qualname__"):
+        func_name = func.__qualname__
+        module = sys.modules[module_path]
+        
+        # Try to get the function from the module
+        # This handles nested functions by traversing the object hierarchy
+        parts = func_name.split('.')
+        current = module
+        for part in parts:
+            if hasattr(current, part):
+                current = getattr(current, part)
+            else:
+                raise AttributeError(f"Cannot find {{part}} in {{current}}")
+        
+        # Use the function from the module instead of the pickled one
+        func = current
 
 # Decode base64 and unpickle
 pickled_bytes = base64.b64decode("{}")
@@ -258,6 +295,8 @@ elif args is not None:
 else:
     result = func()
             "#, 
+            module_path,
+            file_path,
             pickled_data
         );
         
@@ -540,8 +579,46 @@ fn exec_isolated<'py>(py: Python<'py>, runner_id: &str, func: PyObject, args: Op
     locals.set_item("func", func)?;
     locals.set_item("args", args.unwrap_or_else(|| py.None()))?;
     
-    // Pickle the function and args and encode in base64
-    let pickle_code = "import pickle, base64; pickled_data = base64.b64encode(pickle.dumps((func, args))).decode('utf-8')";
+    // Get the module path of the function
+    let get_module_code = r#"
+import inspect, sys, os.path
+
+def get_func_module_path(func):
+    print("Inspecting func", func)
+    if hasattr(func, '__module__'):
+        module_name = func.__module__
+        if module_name != '__main__':
+            return module_name, None
+        else:
+            # Handle functions from directly executed scripts
+            try:
+                # Get the file where the function is defined
+                file_path = inspect.getfile(func)
+                if file_path and os.path.exists(file_path):
+                    # Store the file path in a separate variable
+                    return None, file_path
+            except (TypeError, ValueError):
+                pass
+    return None, None
+
+# Final string conversions, expected output values
+func_module_path_raw, func_file_path_raw = get_func_module_path(func)
+func_module_path = func_module_path_raw if func_module_path_raw is not None else "null"
+func_file_path = func_file_path_raw if func_file_path_raw is not None else "null"
+"#;
+    
+    py.run(get_module_code, None, Some(locals))?;
+
+    let func_module_path = locals.get_item("func_module_path")
+        .ok_or_else(|| PyRuntimeError::new_err("Failed to get function module path"))?
+        .extract::<String>()?;
+    
+    let func_file_path = locals.get_item("func_file_path")
+        .ok_or_else(|| PyRuntimeError::new_err("Failed to get function file path"))?
+        .extract::<String>()?;
+    
+    // Pickle the function, args, and module path and encode in base64
+    let pickle_code = "import pickle, base64; pickled_data = base64.b64encode(pickle.dumps((func, args, func_module_path))).decode('utf-8')";
     py.run(pickle_code, None, Some(locals))?;
     
     // Get the pickled data - now it's a string because we decoded it in Python
@@ -552,7 +629,7 @@ fn exec_isolated<'py>(py: Python<'py>, runner_id: &str, func: PyObject, args: Op
     let runners = IMPORT_RUNNERS.lock().unwrap();
     if let Some(runner) = runners.get(runner_id) {
         // Convert Rust Result<String, String> to PyResult
-        match runner.exec_isolated(&pickled_data) {
+        match runner.exec_isolated(&func_module_path, &func_file_path, &pickled_data) {
             Ok(result) => Ok(py.eval(&format!("'{}'", result), None, None)?),
             Err(err) => Err(PyRuntimeError::new_err(err))
         }

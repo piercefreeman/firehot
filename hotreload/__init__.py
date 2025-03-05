@@ -47,7 +47,7 @@ class ImportRunner:
         Execute a function in the isolated environment.
         
         Args:
-            func: The function to execute
+            func: The function to execute. A function should fully contain its content, including imports.
             *args: Arguments to pass to the function
             
         Returns:
