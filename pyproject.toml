@@ -32,7 +32,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-external_package = { path = "./external_package" }
+external_package = { path = "./external-package" }
 
 [tool.maturin]
 features = ["pyo3/extension-module"] 

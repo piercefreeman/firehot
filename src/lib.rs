@@ -21,10 +21,12 @@ struct ImportInfo {
     module: String,
     /// The names imported from that module.
     names: Vec<String>,
+    /// Whether this is a relative import (starts with . or ..)
+    is_relative: bool,
 }
 
 /// Recursively traverse AST statements to collect import information.
-/// We treat absolute (level 0) imports as third-party imports.
+/// Absolute (level == 0) imports are considered third-party.
 fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
     let mut imports = Vec::new();
     for stmt in stmts {
@@ -38,14 +40,11 @@ fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
                             .clone()
                             .unwrap_or_else(|| alias.name.clone())
                             .to_string()],
+                        is_relative: false,
                     });
                 }
             }
             Stmt::ImportFrom(import_from) => {
-                // Compare the level, which is Option<Int>; assume missing means 0.
-                if import_from.level.unwrap_or(0) != 0 {
-                    continue; // skip relative imports
-                }
                 if let Some(module_name) = &import_from.module {
                     let imported = import_from
                         .names
@@ -61,6 +60,7 @@ fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
                     imports.push(ImportInfo {
                         module: module_name.to_string(),
                         names: imported,
+                        is_relative: import_from.level.map_or(false, |level| level.to_u32() > 0),
                     });
                 }
             }
@@ -92,12 +92,49 @@ fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
     imports
 }
 
+/// Detect the current package name by looking for setup.py, pyproject.toml, or top-level __init__.py files
+fn detect_package_name(path: &Path) -> Option<String> {
+    // Try to find setup.py
+    for entry in WalkDir::new(path)
+        .max_depth(2) // Only check top-level and immediate subdirectories
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let file_path = entry.path();
+        if file_path.file_name().unwrap_or_default() == "setup.py" {
+            if let Ok(content) = fs::read_to_string(file_path) {
+                // Look for name='package_name' or name="package_name"
+                let name_re = regex::Regex::new(r#"name=["']([^"']+)["']"#).unwrap();
+                if let Some(captures) = name_re.captures(&content) {
+                    return Some(captures.get(1).unwrap().as_str().to_string());
+                }
+            }
+        } else if file_path.file_name().unwrap_or_default() == "pyproject.toml" {
+            if let Ok(content) = fs::read_to_string(file_path) {
+                // Look for name = "package_name" in [project] or [tool.poetry] section
+                let name_re = regex::Regex::new(r#"(?:\[project\]|\[tool\.poetry\]).*?name\s*=\s*["']([^"']+)["']"#).unwrap();
+                if let Some(captures) = name_re.captures(&content) {
+                    return Some(captures.get(1).unwrap().as_str().to_string());
+                }
+            }
+        }
+    }
+    
+    // If no setup.py or pyproject.toml found, use directory name as fallback
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|s| s.to_string())
+}
+
 /// Given a path, scan for all Python files, parse them and extract the set of
 /// absolute (non-relative) modules that are imported.
-fn process_py_files(path: &Path) -> Result<HashSet<String>> {
+fn process_py_files(path: &Path) -> Result<(HashSet<String>, Option<String>)> {
     let mut third_party_modules = HashSet::new();
+    let package_name = detect_package_name(path);
+    
+    println!("Detected package name: {:?}", package_name);
 
-    // Walk the directory recursively.
     for entry in WalkDir::new(path)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -110,9 +147,9 @@ fn process_py_files(path: &Path) -> Result<HashSet<String>> {
         let source = fs::read_to_string(file_path)?;
         let parsed = parse(&source, Mode::Module, file_path.to_string_lossy().as_ref())
             .map_err(|e| anyhow!("Failed to parse {}: {:?}", file_path.display(), e))?;
-        // Match on Mod::Module by reference so that we get a slice of statements.
+        // Extract statements from the module. Note: `Mod::Module` now has named fields.
         let stmts: &[Stmt] = match &parsed {
-            Mod::Module(stmts) => stmts,
+            Mod::Module(module) => &module.body,
             _ => {
                 return Err(anyhow!(
                     "Unexpected AST format for module in file {}",
@@ -122,14 +159,18 @@ fn process_py_files(path: &Path) -> Result<HashSet<String>> {
         };
         let imports = collect_imports(stmts);
         for imp in imports {
-            third_party_modules.insert(imp.module);
+            // Skip relative imports and imports of the current package
+            if !imp.is_relative && 
+               !package_name.as_ref().map_or(false, |pkg| imp.module.starts_with(pkg)) {
+                third_party_modules.insert(imp.module);
+            }
         }
     }
-    Ok(third_party_modules)
+    Ok((third_party_modules, package_name))
 }
 
 /// Spawn a Python process that imports the given modules and then sleeps indefinitely.
-/// The Python process prints "IMPORTS_LOADED" to stdout once it has finished importing.
+/// The Python process prints "IMPORTS_LOADED" to stdout once all imports are complete.
 fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
     let mut import_lines = String::new();
     for module in modules {
@@ -156,12 +197,12 @@ time.sleep(1000)
     Ok(child)
 }
 
-/// Take a memory snapshot of the process with the given PID and save it to dump_dir.
+/// Take a memory snapshot of the process with the given PID and save it to `dump_dir`.
 /// On Linux, CRIU is used; on macOS, gcore is used.
 fn take_memory_snapshot(pid: u32, dump_dir: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        std::fs::create_dir_all(dump_dir)?;
+        fs::create_dir_all(dump_dir)?;
         let status = Command::new("criu")
             .args(&[
                 "dump",
@@ -181,7 +222,7 @@ fn take_memory_snapshot(pid: u32, dump_dir: &Path) -> Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        std::fs::create_dir_all(dump_dir)?;
+        fs::create_dir_all(dump_dir)?;
         let snapshot_file = dump_dir.join(format!("core.{}", pid));
         let status = Command::new("gcore")
             .args(&["-o", snapshot_file.to_str().unwrap(), &pid.to_string()])
@@ -195,7 +236,7 @@ fn take_memory_snapshot(pid: u32, dump_dir: &Path) -> Result<()> {
 }
 
 /// Main function tying all steps together.
-fn main() -> Result<()> {
+pub fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         return Err(anyhow!("Usage: {} <path_to_scan>", args[0]));
@@ -203,10 +244,11 @@ fn main() -> Result<()> {
     let scan_path = PathBuf::from(&args[1]);
 
     // 1. Process Python files.
-    let modules = process_py_files(&scan_path)?;
+    let (modules, package_name) = process_py_files(&scan_path)?;
+    println!("Package name: {:?}", package_name);
     println!("Found third-party modules to load: {:?}", modules);
 
-    // 2. Spawn a separate Python process to load these modules.
+    // 2. Spawn a Python process to load these modules.
     let mut child = spawn_python_loader(&modules)?;
 
     // 3. Read stdout until we see "IMPORTS_LOADED".
