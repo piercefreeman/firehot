@@ -5,6 +5,8 @@ import sys
 import os
 import json
 import traceback
+import pickle
+import base64
 
 def main():
     # This will be populated with dynamic import statements from Rust
@@ -27,11 +29,21 @@ def main():
         if pid == 0:
             # Child process
             try:
+                # Set up globals and locals for execution
+                exec_globals = globals().copy()
+                exec_locals = {}
+                
                 # Execute the code
-                exec(code_to_execute)
-                print(f"FORK_RUN_COMPLETE:{{}}", flush=True)
+                exec(code_to_execute, exec_globals, exec_locals)
+                
+                # If we have a result, print it
+                if 'result' in exec_locals:
+                    result_msg = {"result": str(exec_locals['result'])}
+                    print(f"FORK_RUN_COMPLETE:{json.dumps(result_msg)}", flush=True)
+                else:
+                    print(f"FORK_RUN_COMPLETE:{{}}", flush=True)
             except Exception as e:
-                error_msg = {{"error": str(e), "traceback": traceback.format_exc()}}
+                error_msg = {"error": str(e), "traceback": traceback.format_exc()}
                 print(f"FORK_RUN_ERROR:{json.dumps(error_msg)}", flush=True)
             finally:
                 # Exit the child process
@@ -54,11 +66,12 @@ def main():
                 fork_pid = handle_fork_request(code_to_execute)
                 print(f"FORKED:{fork_pid}", flush=True)
             elif command == "EXIT":
+                print("Exiting loader process", flush=True)
                 break
             else:
                 print(f"UNKNOWN_COMMAND:{command}", flush=True)
         except Exception as e:
-            error_msg = {{"error": str(e), "traceback": traceback.format_exc()}}
+            error_msg = {"error": str(e), "traceback": traceback.format_exc()}
             print(f"ERROR:{json.dumps(error_msg)}", flush=True)
 
 if __name__ == "__main__":

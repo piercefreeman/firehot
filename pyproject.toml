@@ -16,10 +16,6 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
-dependencies = [
-    "external_package"
-]
-
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
@@ -30,9 +26,6 @@ dev = [
     "ruff>=0.0.292",
     "maturin>=1.0,<2.0"
 ]
-
-[tool.uv.sources]
-external_package = { path = "./external-package" }
 
 [tool.maturin]
 features = ["pyo3/extension-module"] 

@@ -1,0 +1,23 @@
+[project]
+name = "mypackage"
+version = "0.1.0"
+description = "A Python package with Rust extensions"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+dependencies = [
+    "hotreload",
+    "external_package"
+]
+
+[tool.uv.sources]
+external_package = { path = "./external-package" }
+hotreload = { path = "../hotreload" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["mypackage"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

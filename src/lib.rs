@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use std::{
     collections::HashSet,
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Write, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
 };
@@ -13,6 +13,14 @@ use rustpython_parser::ast::{
     Mod, Stmt,
     StmtIf, StmtWhile, StmtFunctionDef, StmtAsyncFunctionDef, StmtClassDef,
 };
+
+// Add PyO3 imports for Python bindings
+use pyo3::prelude::*;
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::types::{PyBytes, PyDict, PyFunction};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::sync::Lazy;
 
 /// A simple structure to hold information about an import.
 #[derive(Debug)]
@@ -198,6 +206,212 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
         .map_err(|e| anyhow!("Failed to spawn python process: {}", e))?;
     
     Ok(child)
+}
+
+/// Runner for isolated Python code execution
+#[pyclass]
+struct ImportRunner {
+    child: Arc<Mutex<Child>>,
+    stdin: Arc<Mutex<std::process::ChildStdin>>,
+    reader: Arc<Mutex<BufReader<std::process::ChildStdout>>>,
+}
+
+#[pymethods]
+impl ImportRunner {
+    /// Execute a function in the isolated environment
+    #[pyo3(text_signature = "(func, args, /)")]
+    fn exec<'py>(
+        &self, 
+        py: Python<'py>, 
+        func: PyObject, 
+        args: Option<PyObject>
+    ) -> PyResult<&'py PyAny> {
+        // Create a dict to hold our function and args for pickling
+        let locals = PyDict::new(py);
+        locals.set_item("func", func)?;
+        locals.set_item("args", args.unwrap_or_else(|| py.None()))?;
+        
+        // Pickle the function and args
+        let pickle_code = "import pickle; pickled_data = pickle.dumps((func, args))";
+        py.run(pickle_code, None, Some(locals))?;
+        
+        // Get the pickled data
+        let pickled_data = locals.get_item("pickled_data")
+            .ok_or_else(|| PyRuntimeError::new_err("Failed to pickle function and args"))?;
+        let pickled_bytes = pickled_data.downcast::<PyBytes>()
+            .map_err(|_| PyRuntimeError::new_err("Pickled data is not bytes"))?;
+        
+        // Create the Python execution code that will unpickle and run the function
+        let exec_code = format!(
+            r#"
+import pickle
+import base64
+
+# Base64 encode for safe transmission
+pickled_bytes = {}
+data = pickle.loads(pickled_bytes)
+func, args = data
+
+# Run the function with args
+if isinstance(args, tuple):
+    result = func(*args)
+elif args is not None:
+    result = func(args)
+else:
+    result = func()
+            "#, 
+            py.eval("repr(pickled_data)", None, None)?
+        );
+        
+        // Send the code to the forked process
+        let mut stdin_guard = self.stdin.lock()
+            .map_err(|_| PyRuntimeError::new_err("Failed to lock stdin mutex"))?;
+        writeln!(stdin_guard, "FORK:{}", exec_code)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to write to child process: {}", e)))?;
+        drop(stdin_guard);
+        
+        // Wait for response
+        let mut reader_guard = self.reader.lock()
+            .map_err(|_| PyRuntimeError::new_err("Failed to lock reader mutex"))?;
+        
+        for line in (&mut *reader_guard).lines() {
+            let line = line.map_err(|e| PyRuntimeError::new_err(format!("Failed to read line: {}", e)))?;
+            
+            if line.starts_with("FORKED:") {
+                let fork_pid = line[7..].parse::<i32>()
+                    .map_err(|_| PyRuntimeError::new_err("Invalid fork PID"))?;
+                py.allow_threads(|| {
+                    // Wait a bit for the fork to complete to avoid race conditions
+                    std::thread::sleep(Duration::from_millis(100));
+                });
+                return Ok(py.eval(
+                    &format!("print('Function running in forked process (PID: {}')", fork_pid), 
+                    None, None
+                )?);
+            }
+            
+            if line.starts_with("FORK_RUN_ERROR:") {
+                let error_json = &line[14..];
+                return Err(PyRuntimeError::new_err(format!("Function execution failed: {}", error_json)));
+            }
+            
+            if line.starts_with("ERROR:") {
+                let error_msg = &line[6..];
+                return Err(PyRuntimeError::new_err(format!("Process error: {}", error_msg)));
+            }
+        }
+        
+        Err(PyRuntimeError::new_err("Unexpected end of output from child process"))
+    }
+}
+
+/// Python module for hot reloading with isolated imports
+#[pymodule]
+fn hotreload(_py: Python, m: &PyModule) -> PyResult<()> {
+    // Register the module functions
+    m.add_function(wrap_pyfunction!(start_import_runner, m)?)?;
+    m.add_function(wrap_pyfunction!(stop_import_runner, m)?)?;
+    m.add_function(wrap_pyfunction!(isolate_imports, m)?)?;
+    
+    Ok(())
+}
+
+// Global storage for the import runner
+static IMPORT_RUNNER: Lazy<Mutex<Option<ImportRunner>>> = Lazy::new(|| Mutex::new(None));
+
+/// Initialize and start the import runner
+#[pyfunction]
+fn start_import_runner(py: Python, package_path: &str) -> PyResult<()> {
+    // Process Python files
+    let (modules, package_name) = process_py_files(Path::new(package_path))
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to process Python files: {}", e)))?;
+    
+    let package_name = package_name.ok_or_else(|| 
+        PyRuntimeError::new_err("Could not determine package name"))?;
+    
+    // Spawn Python subprocess to load modules
+    let mut child = spawn_python_loader(&modules)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to spawn Python loader: {}", e)))?;
+    
+    let stdin = child.stdin.take()
+        .ok_or_else(|| PyRuntimeError::new_err("Failed to capture stdin for python process"))?;
+    
+    let stdout = child.stdout.take()
+        .ok_or_else(|| PyRuntimeError::new_err("Failed to capture stdout for python process"))?;
+    
+    let reader = BufReader::new(stdout);
+    let mut lines_iter = reader.lines();
+    
+    // Wait for the IMPORTS_LOADED message
+    let mut imports_loaded = false;
+    for line in &mut lines_iter {
+        let line = line.map_err(|e| PyRuntimeError::new_err(format!("Failed to read line: {}", e)))?;
+        if line == "IMPORTS_LOADED" {
+            imports_loaded = true;
+            break;
+        }
+        // Print any other messages (like import errors)
+        println!("{}", line);
+    }
+    
+    if !imports_loaded {
+        return Err(PyRuntimeError::new_err("Python loader did not report successful imports"));
+    }
+    
+    // Create a new reader from the remaining content
+    let reader = BufReader::new(stdout);
+    
+    // Create the runner object
+    let runner = ImportRunner {
+        child: Arc::new(Mutex::new(child)),
+        stdin: Arc::new(Mutex::new(stdin)),
+        reader: Arc::new(Mutex::new(reader)),
+    };
+    
+    // Store in global storage
+    let mut global_runner = IMPORT_RUNNER.lock().unwrap();
+    *global_runner = Some(runner);
+    
+    Ok(())
+}
+
+/// Stop the import runner
+#[pyfunction]
+fn stop_import_runner(_py: Python) -> PyResult<()> {
+    let mut global_runner = IMPORT_RUNNER.lock().unwrap();
+    if let Some(runner) = global_runner.take() {
+        // Clean up resources
+        let mut child = runner.child.lock().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    
+    Ok(())
+}
+
+/// Function to isolate imports
+#[pyfunction]
+fn isolate_imports(py: Python, package_path: &str) -> PyResult<PyObject> {
+    // First, ensure we have a runner available
+    {
+        let global_runner = IMPORT_RUNNER.lock().unwrap();
+        if global_runner.is_none() {
+            start_import_runner(py, package_path)?;
+        }
+    }
+    
+    // Create a Python module with the functions needed
+    let sys = py.import("sys")?;
+    let builtins = py.import("builtins")?;
+    let importlib = py.import("importlib")?;
+    
+    // Return the Python module with utilities
+    let module = PyModule::new(py, "hotreload_utils")?;
+    module.add("sys", sys)?;
+    module.add("builtins", builtins)?;
+    module.add("importlib", importlib)?;
+    
+    Ok(module.into())
 }
 
 /// Main function tying all steps together.

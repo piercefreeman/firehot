@@ -86,17 +86,9 @@ wheels = [
 ]
 
 [[package]]
-name = "external-package"
-version = "0.1.0"
-source = { directory = "external-package" }
-
-[[package]]
 name = "hotreload"
 version = "0.1.0"
 source = { editable = "." }
-dependencies = [
-    { name = "external-package" },
-]
 
 [package.optional-dependencies]
 dev = [
@@ -112,7 +104,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
-    { name = "external-package", directory = "external-package" },
     { name = "isort", marker = "extra == 'dev'", specifier = ">=5.12.0" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.0,<2.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
