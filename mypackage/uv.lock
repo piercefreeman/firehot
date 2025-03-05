@@ -11,7 +11,7 @@ name = "hotreload"
 version = "0.1.0"
 source = { path = "../target/wheels/hotreload-0.1.0-cp312-cp312-macosx_11_0_arm64.whl" }
 wheels = [
-    { filename = "hotreload-0.1.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:fbb00b9ba79d83fd82e887863fa24c4ae07ba5649ab95fbcd907a00f73d3dad3" },
+    { filename = "hotreload-0.1.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:d8355a1855a4f1dfc88cd48a40eeae0f8c635d4135287f036883b59cfba07bd6" },
 ]
 
 [[package]]

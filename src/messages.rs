@@ -227,21 +227,26 @@ pub mod io {
     use std::io::{Read, Write};
 
     /// Write a message to the given writer
-    pub fn write_message<W: Write, M: Serialize>(writer: &mut W, message: &M) -> std::io::Result<()> {
+    pub fn write_message<W: Write, M: Serialize>(
+        writer: &mut W,
+        message: &M,
+    ) -> std::io::Result<()> {
         let json = serde_json::to_string(message)?;
         writeln!(writer, "{}", json)?;
         Ok(())
     }
 
     /// Read a message from the given reader
-    pub fn read_message<R: Read>(reader: &mut R) -> Result<Option<Message>, Box<dyn std::error::Error>> {
+    pub fn read_message<R: Read>(
+        reader: &mut R,
+    ) -> Result<Option<Message>, Box<dyn std::error::Error>> {
         let mut buffer = String::new();
         let bytes_read = reader.read_to_string(&mut buffer)?;
-        
+
         if bytes_read == 0 {
             return Ok(None);
         }
-        
+
         let message: Message = serde_json::from_str(&buffer)?;
         Ok(Some(message))
     }
@@ -266,7 +271,11 @@ mod tests {
         // This is the exact format we're seeing from Python.
         let json = r#"{"name": "IMPORT_COMPLETE"}"#;
         let parsed: Result<Message, _> = serde_json::from_str(json);
-        assert!(parsed.is_ok(), "Failed to parse ImportComplete: {:?}", parsed.err());
+        assert!(
+            parsed.is_ok(),
+            "Failed to parse ImportComplete: {:?}",
+            parsed.err()
+        );
     }
 
     #[test]
@@ -274,8 +283,12 @@ mod tests {
         // This is the exact format we're seeing from Python.
         let json = r#"{"name": "IMPORT_COMPLETE"}"#;
         let parsed: Result<Message, _> = serde_json::from_str(json);
-        assert!(parsed.is_ok(), "Failed to parse Message enum: {:?}", parsed.err());
-        
+        assert!(
+            parsed.is_ok(),
+            "Failed to parse Message enum: {:?}",
+            parsed.err()
+        );
+
         if let Ok(message) = parsed {
             match message {
                 Message::ImportComplete(_) => (), // Success
@@ -289,26 +302,46 @@ mod tests {
         // Test ImportComplete
         let json = r#"{"name": "IMPORT_COMPLETE"}"#;
         let parsed: Result<Message, _> = serde_json::from_str(json);
-        assert!(parsed.is_ok(), "Failed to parse ImportComplete: {:?}", parsed.err());
+        assert!(
+            parsed.is_ok(),
+            "Failed to parse ImportComplete: {:?}",
+            parsed.err()
+        );
 
         // Test ForkRequest
         let json = r#"{"name": "FORK_REQUEST", "code": "print('hello')"}"#;
         let parsed: Result<Message, _> = serde_json::from_str(json);
-        assert!(parsed.is_ok(), "Failed to parse ForkRequest: {:?}", parsed.err());
+        assert!(
+            parsed.is_ok(),
+            "Failed to parse ForkRequest: {:?}",
+            parsed.err()
+        );
 
         // Test ForkResponse
         let json = r#"{"name": "FORK_RESPONSE", "child_pid": 1234}"#;
         let parsed: Result<Message, _> = serde_json::from_str(json);
-        assert!(parsed.is_ok(), "Failed to parse ForkResponse: {:?}", parsed.err());
+        assert!(
+            parsed.is_ok(),
+            "Failed to parse ForkResponse: {:?}",
+            parsed.err()
+        );
 
         // Test ChildComplete
         let json = r#"{"name": "CHILD_COMPLETE", "result": "success"}"#;
         let parsed: Result<Message, _> = serde_json::from_str(json);
-        assert!(parsed.is_ok(), "Failed to parse ChildComplete: {:?}", parsed.err());
+        assert!(
+            parsed.is_ok(),
+            "Failed to parse ChildComplete: {:?}",
+            parsed.err()
+        );
 
         // Test ChildError
         let json = r#"{"name": "CHILD_ERROR", "error": "Something went wrong"}"#;
         let parsed: Result<Message, _> = serde_json::from_str(json);
-        assert!(parsed.is_ok(), "Failed to parse ChildError: {:?}", parsed.err());
+        assert!(
+            parsed.is_ok(),
+            "Failed to parse ChildError: {:?}",
+            parsed.err()
+        );
     }
 }

@@ -2,6 +2,8 @@
 This is the main entrypoint for our continuously running parent process. It will receive commands
 from Rust and execute them.
 
+Intended for embeddable usage in Rust, can only import stdlib modules.
+
 """
 import sys
 import os

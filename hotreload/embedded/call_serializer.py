@@ -1,3 +1,9 @@
+"""
+Call serializer for hotreload.
+
+Intended for embeddable usage in Rust, can only import stdlib modules.
+
+"""
 import inspect, sys, os.path
 from typing import Callable
 
