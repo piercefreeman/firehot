@@ -1,7 +1,7 @@
 [project]
 name = "mypackage"
 version = "0.1.0"
-description = "A Python package with Rust extensions"
+description = "An example package showing how to use firehot"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

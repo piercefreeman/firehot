@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "firehot"
 version = "0.1.0"
-description = "A Python package with Rust extensions"
+description = "Wicked fast hot reloading"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
