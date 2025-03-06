@@ -125,7 +125,6 @@ impl ProjectAstManager {
     /// now return an error.
     /// Returns (added modules, removed modules)
     pub fn compute_import_delta(&mut self) -> Result<(HashSet<String>, HashSet<String>)> {
-        debug!("Computing import delta");
         // Copy previous imports
         let previous_imports: HashSet<String> = self
             .file_imports
