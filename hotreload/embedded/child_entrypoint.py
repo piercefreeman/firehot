@@ -4,14 +4,14 @@ Child entrypoint for hotreload.
 Intended for embeddable usage in Rust, can only import stdlib modules.
 
 """
-import pickle
+
 import base64
 import importlib
 import importlib.util
+import pickle
 import sys
-import os
 
-# These will imported dynamically by rust 
+# These will imported dynamically by rust
 module_path: str
 pickled_str: str
 

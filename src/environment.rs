@@ -226,6 +226,9 @@ pickled_str = "{}"
         let (added, removed) = self.ast_manager.compute_import_delta()
             .map_err(|e| format!("Failed to compute import delta: {}", e))?;
 
+        println!("Added: {:?}", added);
+        println!("Removed: {:?}", removed);
+
         // Check if there are any changes in imports
         if !added.is_empty() || !removed.is_empty() {
             println!("Detected changes in imports:");

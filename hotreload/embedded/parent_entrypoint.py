@@ -5,18 +5,21 @@ from Rust and execute them.
 Intended for embeddable usage in Rust, can only import stdlib modules.
 
 """
-import sys
+
 import os
-from traceback import format_exc
-from time import sleep
-from dataclasses import dataclass, asdict
-from json import loads as json_loads, dumps as json_dumps
+import sys
+from dataclasses import asdict, dataclass
 from enum import StrEnum
+from json import dumps as json_dumps
+from json import loads as json_loads
 from json.decoder import JSONDecodeError
+from time import sleep
+from traceback import format_exc
 
 #
 # Messages
 #
+
 
 class MessageType(StrEnum):
     FORK_REQUEST = "FORK_REQUEST"
@@ -29,10 +32,13 @@ class MessageType(StrEnum):
     IMPORT_COMPLETE = "IMPORT_COMPLETE"
     EXIT_REQUEST = "EXIT_REQUEST"
 
+
 class MessageBase:
     name: MessageType
 
+
 # Requests
+
 
 @dataclass
 class ForkRequest(MessageBase):
@@ -40,11 +46,14 @@ class ForkRequest(MessageBase):
 
     name: MessageType = MessageType.FORK_REQUEST
 
+
 @dataclass
 class ExitRequest(MessageBase):
     name: MessageType = MessageType.EXIT_REQUEST
 
+
 # Responses
+
 
 @dataclass
 class ForkResponse(MessageBase):
@@ -52,11 +61,13 @@ class ForkResponse(MessageBase):
 
     name: MessageType = MessageType.FORK_RESPONSE
 
+
 @dataclass
 class ChildComplete(MessageBase):
     result: str | None
 
     name: MessageType = MessageType.CHILD_COMPLETE
+
 
 @dataclass
 class ChildError(MessageBase):
@@ -65,11 +76,13 @@ class ChildError(MessageBase):
 
     name: MessageType = MessageType.CHILD_ERROR
 
+
 @dataclass
 class UnknownCommandError(MessageBase):
     command: str
 
     name: MessageType = MessageType.UNKNOWN_COMMAND
+
 
 @dataclass
 class UnknownError(MessageBase):
@@ -78,6 +91,7 @@ class UnknownError(MessageBase):
 
     name: MessageType = MessageType.UNKNOWN_ERROR
 
+
 @dataclass
 class ImportError(MessageBase):
     error: str
@@ -85,9 +99,11 @@ class ImportError(MessageBase):
 
     name: MessageType = MessageType.IMPORT_ERROR
 
+
 @dataclass
 class ImportComplete(MessageBase):
     name: MessageType = MessageType.IMPORT_COMPLETE
+
 
 MESSAGES = {
     MessageType.FORK_REQUEST: ForkRequest,
@@ -101,8 +117,10 @@ MESSAGES = {
     MessageType.EXIT_REQUEST: ExitRequest,
 }
 
+
 def write_message(message: MessageBase):
     print(json_dumps(asdict(message)), flush=True)
+
 
 def read_message() -> MessageBase | None:
     line = sys.stdin.readline().strip()
@@ -127,14 +145,16 @@ def read_message() -> MessageBase | None:
 
     return MESSAGES[message_type](**payload)
 
+
 #
 # Main Logic
 #
 
+
 def main():
     # This will be populated with dynamic import statements from Rust
     dynamic_imports = sys.argv[1] if len(sys.argv) > 1 else ""
-    
+
     # Execute the dynamic imports
     try:
         if dynamic_imports:
@@ -155,17 +175,17 @@ def main():
                 # Set up globals and locals for execution
                 exec_globals = globals().copy()
                 exec_locals = {}
-                
+
                 print("Will execute code in forked process...", flush=True)
 
                 # Execute the code
                 exec(code_to_execute, exec_globals, exec_locals)
 
                 print("Executed code in forked process", flush=True)
-                
+
                 # By convention, the result is stored in the 'result' variable
-                if 'result' in exec_locals:
-                    write_message(ChildComplete(result=str(exec_locals['result'])))
+                if "result" in exec_locals:
+                    write_message(ChildComplete(result=str(exec_locals["result"])))
                 else:
                     write_message(ChildComplete(result=None))
             except Exception as e:
@@ -184,7 +204,7 @@ def main():
             if not command:
                 sleep(0.1)
                 continue
-            
+
             if isinstance(command, ForkRequest):
                 fork_pid = handle_fork_request(command.code)
                 write_message(ForkResponse(child_pid=fork_pid))
@@ -195,6 +215,7 @@ def main():
                 write_message(UnknownCommandError(command=str(command)))
         except Exception as e:
             write_message(UnknownError(error=str(e), traceback=format_exc()))
+
 
 if __name__ == "__main__":
     main()
