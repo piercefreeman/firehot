@@ -42,6 +42,8 @@ jobs:
         path: |
           ~/.cache/uv
           .venv
+          */*/venv
+          */.venv
         key: ${{ runner.os }}-uv-deps-${{ matrix.package }}-${{ hashFiles('**/pyproject.toml') }}
     
     - name: Create virtual environment
@@ -49,37 +51,46 @@ jobs:
         uv venv
         echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV
         echo "$PWD/.venv/bin" >> $GITHUB_PATH
-        
-    - name: Install common dependencies
-      run: |
-        uv pip install maturin pytest ruff pyright
     
     - name: Install hotreload dependencies & run lint
       if: matrix.package == 'hotreload'
-      run: |
-        cd hotreload
-        if [ -f "pyproject.toml" ]; then
-          uv pip install -e .
-        fi
-        cd ..
-        make ci-lint-hotreload
+      run: make ci-lint-hotreload
         
     - name: Install mypackage dependencies & run lint
       if: matrix.package == 'mypackage'
+      # Our explicit uv add is necessary to override our locally set wheel. We should remove this
+      # once we have a way to update the built executable locally.
       run: |
-        cd mypackage/mypackage
-        if [ -f "pyproject.toml" ]; then
-          uv pip install -e .
-        fi
-        cd ../..
+        (cd mypackage && uv add ..)
         make ci-lint-mypackage
         
     - name: Install external dependencies & run lint
       if: matrix.package == 'external'
+      run: make ci-lint-external
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    
+    - name: Install uv
       run: |
-        cd mypackage/external-package
-        if [ -f "pyproject.toml" ]; then
-          uv pip install -e .
-        fi
-        cd ../..
-        make ci-lint-external 
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        
+    - name: Create virtual environment
+      run: |
+        uv venv
+        echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV
+        echo "$PWD/.venv/bin" >> $GITHUB_PATH
+        
+    - name: Run tests
+      run: |
+        make test-hotreload 

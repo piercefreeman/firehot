@@ -1,4 +1,4 @@
-.PHONY: lint lint-ruff lint-pyright lint-hotreload lint-mypackage lint-external ci-lint ci-lint-ruff ci-lint-pyright ci-lint-hotreload ci-lint-mypackage ci-lint-external
+.PHONY: lint lint-ruff lint-pyright lint-hotreload lint-mypackage lint-external ci-lint ci-lint-ruff ci-lint-pyright ci-lint-hotreload ci-lint-mypackage ci-lint-external test-hotreload
 
 # Default target
 all: lint
@@ -121,6 +121,12 @@ ci-lint-pyright:
 	done
 	@echo "\n=== Pyright type checking completed successfully for all packages ==="
 
+# Test target for hotreload package
+test-hotreload:
+	@echo "=== Running tests for hotreload package ==="
+	(cd $(ROOT_DIR) && uv run pytest -vvv) || { echo "FAILED: tests in $(ROOT_DIR)"; exit 1; }
+	@echo "=== Tests completed successfully for hotreload package ==="
+
 # Show help
 help:
 	@echo "Available targets:"
@@ -138,3 +144,5 @@ help:
 	@echo "  ci-lint-external - Run all linters on external-package only (validation only)"
 	@echo "  ci-lint-ruff    - Run ruff linter only (all packages, validation only)"
 	@echo "  ci-lint-pyright - Run pyright type checker only (all packages)"
+	@echo " "
+	@echo "  test-hotreload  - Run tests for the hotreload package"
