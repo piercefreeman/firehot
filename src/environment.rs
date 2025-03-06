@@ -1,30 +1,34 @@
 use anstream::eprintln;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use log::{debug, error, info, trace, warn};
 use owo_colors::OwoColorize;
 use serde_json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Write};
-use std::process::Child;
-use std::time::{Duration, Instant};
+use std::process::{Child, Command, Stdio};
+use std::time::Instant;
 
 use libc;
-use scripts::PYTHON_CHILD_SCRIPT;
 use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::ast::ProjectAstManager;
 use crate::messages::{ExitRequest, ForkRequest, Message};
-use crate::scripts;
+use crate::scripts::PYTHON_LOADER_SCRIPT;
+
+/// Runtime environment for executing Python code
+pub struct Environment {
+    pub child: Child,                    // The forkable process with all imports loaded
+    pub stdin: std::process::ChildStdin, // The stdin of the forkable process
+    pub reader: std::io::Lines<BufReader<std::process::ChildStdout>>, // The reader of the forkable process
+    pub forked_processes: HashMap<String, i32>,                       // Map of UUID to PID
+}
 
 /// Runner for isolated Python code execution
 pub struct ImportRunner {
     pub id: String,
-    pub child: Arc<Mutex<Child>>,
-    pub stdin: Arc<Mutex<std::process::ChildStdin>>,
-    pub reader: Arc<Mutex<std::io::Lines<BufReader<std::process::ChildStdout>>>>,
-    pub forked_processes: Arc<Mutex<HashMap<String, i32>>>, // Map of UUID to PID
+    pub environment: Option<Arc<Mutex<Environment>>>,
     pub ast_manager: ProjectAstManager, // Project AST manager for this environment
 
     first_scan: bool,
@@ -33,24 +37,35 @@ pub struct ImportRunner {
 impl ImportRunner {
     pub fn new(project_name: &str, project_path: &str) -> Self {
         // Create a new AST manager for this project
-        let mut ast_manager = ast::ProjectAstManager::new(project_name, package_path);
+        let ast_manager = ProjectAstManager::new(project_name, project_path);
         info!("Created AST manager for project: {}", project_name);
 
         Self {
             id: Uuid::new_v4().to_string(),
+            environment: None,
             ast_manager,
             first_scan: false,
         }
     }
 
-    pub fn boot_main(&self) -> Result<(), String> {
+    //
+    // Main process management
+    //
+
+    pub fn boot_main(&mut self) -> Result<(), String> {
+        let mut third_party_modules = HashSet::new();
+
         if !self.first_scan {
             // Process Python files to get initial imports. This baseline warms the cache by building
             // the index of file shas and their imports.
-            info!("Processing Python files in: {}", package_path);
-            let third_party_modules = ast_manager.process_all_py_files().map_err(|e| {
-                PyRuntimeError::new_err(format!("Failed to process Python files: {}", e))
-            })?;
+            info!(
+                "Processing Python files in: {}",
+                self.ast_manager.get_project_path()
+            );
+            third_party_modules = self
+                .ast_manager
+                .process_all_py_files()
+                .map_err(|e| format!("Failed to process Python files: {}", e))?;
             self.first_scan = true;
         }
 
@@ -61,18 +76,18 @@ impl ImportRunner {
             "Spawning Python subprocess to load {} modules",
             third_party_modules.len()
         );
-        let mut child = spawn_python_loader(&third_party_modules).map_err(|e| {
-            PyRuntimeError::new_err(format!("Failed to spawn Python loader: {}", e))
-        })?;
+        let mut child = spawn_python_loader(&third_party_modules)
+            .map_err(|e| format!("Failed to spawn Python loader: {}", e))?;
 
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| PyRuntimeError::new_err("Failed to capture stdin for python process"))?;
+            .ok_or_else(|| "Failed to capture stdin for python process".to_string())?;
 
-        let stdout = child.stdout.take().ok_or_else(|| {
-            PyRuntimeError::new_err("Failed to capture stdout for python process")
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Failed to capture stdout for python process".to_string())?;
 
         let reader = BufReader::new(stdout);
         let mut lines_iter = reader.lines();
@@ -81,8 +96,7 @@ impl ImportRunner {
         info!("Waiting for import completion...");
         let mut imports_loaded = false;
         for line in &mut lines_iter {
-            let line =
-                line.map_err(|e| PyRuntimeError::new_err(format!("Failed to read line: {}", e)))?;
+            let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
 
             // Parse the line as a message
             if let Ok(message) = serde_json::from_str::<Message>(&line) {
@@ -98,11 +112,11 @@ impl ImportRunner {
                             error.error,
                             error.traceback.clone().unwrap_or_default()
                         );
-                        return Err(PyRuntimeError::new_err(format!(
+                        return Err(format!(
                             "Import error: {}: {}",
                             error.error,
                             error.traceback.unwrap_or_default()
-                        )));
+                        ));
                     }
                     _ => {
                         // Log other message types for debugging
@@ -117,9 +131,7 @@ impl ImportRunner {
 
         if !imports_loaded {
             error!("Python loader did not report successful imports");
-            return Err(PyRuntimeError::new_err(
-                "Python loader did not report successful imports",
-            ));
+            return Err("Python loader did not report successful imports".to_string());
         }
 
         // Calculate total setup time and log completion
@@ -142,280 +154,306 @@ impl ImportRunner {
             } else {
                 String::new()
             },
-            format!("with ID: {}", runner_id).white().bold()
-        );
-    }
-
-    /// Execute a function in the isolated environment. This should be called from the main thread (the one
-    /// that spawned our hotreloader) so we can get the local function and closure variables.
-    pub fn exec_isolated(&self, pickled_data: &str) -> Result<String, String> {
-        debug!("Executing function in isolated environment");
-        // Create the Python execution code that will unpickle and run the function
-        // Errors don't seem to get caught in the parent process, so we need to log them here
-        let exec_code = format!(
-            r#"
-pickled_str = "{}"
-
-{}
-            "#,
-            pickled_data, PYTHON_CHILD_SCRIPT,
+            format!("with ID: {}", self.id).white().bold()
         );
 
-        // Send the code to the forked process
-        let mut stdin_guard = self
-            .stdin
-            .lock()
-            .map_err(|e| format!("Failed to lock stdin mutex: {}", e))?;
+        // Create and store the environment
+        let environment = Environment {
+            child,
+            stdin,
+            reader: lines_iter,
+            forked_processes: HashMap::new(),
+        };
 
-        // Create a ForkRequest message
-        let fork_request = Message::ForkRequest(ForkRequest::new(exec_code));
-        let serialized = serde_json::to_string(&fork_request)
-            .map_err(|e| format!("Failed to serialize message: {}", e))?;
+        self.environment = Some(Arc::new(Mutex::new(environment)));
 
-        debug!("Sending fork request message");
-        writeln!(stdin_guard, "{}", serialized)
-            .map_err(|e| format!("Failed to write to child process: {}", e))?;
-
-        drop(stdin_guard);
-
-        // Wait for response
-        let mut reader_guard = self
-            .reader
-            .lock()
-            .map_err(|e| format!("Failed to lock reader mutex: {}", e))?;
-
-        for line in &mut *reader_guard {
-            let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
-
-            // Parse the line as a message
-            if let Ok(message) = serde_json::from_str::<Message>(&line) {
-                debug!("Received message: {:?}", message);
-
-                match message {
-                    Message::ForkResponse(response) => {
-                        // Handle fork response message
-                        let fork_pid = response.child_pid;
-                        info!("Received fork response with PID: {}", fork_pid);
-
-                        // Generate a UUID for this process
-                        let process_uuid = Uuid::new_v4().to_string();
-
-                        // Store the PID with its UUID
-                        let mut forked_processes = self
-                            .forked_processes
-                            .lock()
-                            .map_err(|e| format!("Failed to lock forked processes mutex: {}", e))?;
-                        forked_processes.insert(process_uuid.clone(), fork_pid);
-                        drop(forked_processes);
-
-                        // Wait a bit for the fork to complete to avoid race conditions
-                        std::thread::sleep(Duration::from_millis(100));
-
-                        // Return the UUID
-                        info!("Process UUID created: {}", process_uuid);
-                        return Ok(process_uuid);
-                    }
-                    Message::ChildError(error) => {
-                        // Handle child error message
-                        error!("Function execution failed: {}", error.error);
-                        return Err(format!("Function execution failed: {}", error.error));
-                    }
-                    Message::UnknownError(error) => {
-                        // Handle unknown error message
-                        error!("Process error: {}", error.error);
-                        return Err(format!("Process error: {}", error.error));
-                    }
-                    _ => {
-                        // Log unhandled message types
-                        debug!("Unhandled message type: {:?}", message.name());
-                        continue;
-                    }
-                }
-            } else {
-                // If we can't parse it as a message, log and continue
-                debug!("[python stdout]: {}", line);
-            }
-        }
-
-        error!("Unexpected end of output from child process");
-        Err("Unexpected end of output from child process".to_string())
-    }
-
-    /// Stop an isolated process by UUID
-    pub fn stop_isolated(&self, process_uuid: &str) -> Result<bool, String> {
-        info!("Stopping isolated process: {}", process_uuid);
-        let mut forked_processes = self
-            .forked_processes
-            .lock()
-            .map_err(|e| format!("Failed to lock forked processes mutex: {}", e))?;
-
-        if let Some(pid) = forked_processes.get(process_uuid) {
-            // Send EXIT_REQUEST message to the process
-            let mut stdin_guard = self
-                .stdin
-                .lock()
-                .map_err(|e| format!("Failed to lock stdin mutex: {}", e))?;
-
-            // Create an ExitRequest message
-            let exit_request = ExitRequest::new();
-            let serialized = serde_json::to_string(&exit_request)
-                .map_err(|e| format!("Failed to serialize message: {}", e))?;
-            debug!("Sending exit request to process: {}", process_uuid);
-            writeln!(stdin_guard, "{}", serialized)
-                .map_err(|e| format!("Failed to write exit request: {}", e))?;
-            drop(stdin_guard);
-
-            // Give the process a chance to exit gracefully
-            std::thread::sleep(Duration::from_millis(100));
-
-            // If it's still running, terminate it forcefully
-            unsafe {
-                // Use libc::kill to terminate the process
-                if libc::kill(*pid, libc::SIGTERM) != 0 {
-                    let err_msg = format!(
-                        "Failed to terminate process: {}",
-                        std::io::Error::last_os_error()
-                    );
-                    error!("{}", err_msg);
-                    return Err(err_msg);
-                }
-            }
-
-            // Remove the process from the map
-            forked_processes.remove(process_uuid);
-            info!("Isolated process {} stopped successfully", process_uuid);
-            Ok(true)
-        } else {
-            // This process doesn't own the UUID
-            warn!("Process UUID not found: {}", process_uuid);
-            Ok(false)
-        }
-    }
-
-    /// Communicate with an isolated process to get its output
-    pub fn communicate_isolated(&self, process_uuid: &str) -> Result<Option<String>, String> {
-        debug!("Communicating with isolated process: {}", process_uuid);
-        let forked_processes = self
-            .forked_processes
-            .lock()
-            .map_err(|e| format!("Failed to lock forked processes mutex: {}", e))?;
-
-        if !forked_processes.contains_key(process_uuid) {
-            // This process doesn't own the UUID
-            warn!("Process UUID not found for communication: {}", process_uuid);
-            return Ok(None);
-        }
-        drop(forked_processes);
-
-        // Read from the reader
-        let mut reader_guard = self
-            .reader
-            .lock()
-            .map_err(|e| format!("Failed to lock reader mutex: {}", e))?;
-
-        // Check for messages from the process
-        for _ in 0..1000 {
-            // Limit to avoid infinite loop
-            match reader_guard.next() {
-                Some(Ok(line)) => {
-                    // Parse the line as a message
-                    if let Ok(message) = serde_json::from_str::<Message>(&line) {
-                        match message {
-                            Message::ChildComplete(complete) => {
-                                // If we have a result, return it
-                                if let Some(result) = complete.result {
-                                    debug!("Received result from isolated process");
-                                    return Ok(Some(result));
-                                }
-                            }
-                            Message::ChildError(error) => {
-                                // Return error message as output
-                                error!("Error from isolated process: {}", error.error);
-                                return Ok(Some(format!("Error: {}", error.error)));
-                            }
-                            _ => {
-                                // For other message types, add them to the output
-                                let json = serde_json::to_string(&message)
-                                    .map_err(|e| format!("Failed to serialize message: {}", e))?;
-                                debug!("Unhandled message type from isolated process: {}", json);
-                            }
-                        }
-                    } else {
-                        // Log unrecognized output but don't add it to the result
-                        debug!("[python stdout]: {}", line);
-                    }
-                }
-                Some(Err(e)) => {
-                    let err_msg = format!("Error reading output: {}", e);
-                    error!("{}", err_msg);
-                    return Err(err_msg);
-                }
-                None => break, // No more output
-            }
-        }
-
-        trace!("No result received from isolated process");
-        Ok(None)
+        Ok(())
     }
 
     pub fn stop_main(&self) -> Result<bool, String> {
+        // Check if environment is initialized
+        let environment = match self.environment.as_ref() {
+            Some(env) => env,
+            None => {
+                info!("No environment to stop.");
+                return Ok(false);
+            }
+        };
+
         info!("Stopping main runner process");
-        let mut child = self.child.lock().unwrap();
-        let _ = child.kill();
-        let _ = child.wait();
+
+        let mut env_guard = environment
+            .lock()
+            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+
+        // Kill the main child process
+        if let Err(e) = env_guard.child.kill() {
+            warn!("Failed to kill child process: {}", e);
+        }
+
+        // Wait for the process to exit
+        if let Err(e) = env_guard.child.wait() {
+            warn!("Failed to wait for child process: {}", e);
+        }
+
+        // Clear the process map
+        env_guard.forked_processes.clear();
+
         info!("Main runner process stopped");
         Ok(true)
     }
 
-    /// Update the runner by checking for changes in imports and restarting if necessary
     pub fn update_environment(&mut self) -> Result<bool, String> {
-        let (added, removed) = self
+        info!("Checking for environment updates...");
+
+        // Check for any changes to the imports
+        if !self.first_scan {
+            return Ok(false); // Nothing to update if we haven't even scanned yet
+        }
+
+        // Process all Python files to get the current imports
+        let new_imports = self
             .ast_manager
-            .compute_import_delta()
-            .map_err(|e| format!("Failed to compute import delta: {}", e))?;
+            .process_all_py_files()
+            .map_err(|e| format!("Failed to process Python files: {}", e))?;
 
-        debug!("Added imports: {:?}", added);
-        debug!("Removed imports: {:?}", removed);
+        // Get previous imports - we'll just re-scan for now
+        let previous_imports = self
+            .ast_manager
+            .process_all_py_files()
+            .map_err(|e| format!("Failed to process Python files: {}", e))?;
 
-        // Check if there are any changes in imports
-        if !added.is_empty() || !removed.is_empty() {
-            info!("Detected changes in imports:");
-            if !added.is_empty() {
-                info!("Added imports: {:?}", added);
-            }
-            if !removed.is_empty() {
-                info!("Removed imports: {:?}", removed);
-            }
+        // Check if imports have changed
+        if new_imports == previous_imports {
+            info!("No changes to imports detected");
+            return Ok(false);
+        }
 
-            // Attempt to stop any existing forked processes
-            let forked_processes = self.forked_processes.lock().unwrap();
+        info!(
+            "Detected changes to imports. Old: {:?}, New: {:?}",
+            previous_imports, new_imports
+        );
 
-            // Copy the keys to avoid borrowing issues
-            let process_uuids: Vec<String> = forked_processes.keys().cloned().collect();
-            drop(forked_processes);
+        // Stop any existing processes
+        if let Some(env) = self.environment.as_ref() {
+            let forked_processes = {
+                let env_guard = env
+                    .lock()
+                    .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
-            // Stop each process
-            for process_uuid in process_uuids {
+                // Create a copy of the process UUIDs
+                env_guard
+                    .forked_processes
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<String>>()
+            };
+
+            // Stop all forked processes
+            for process_uuid in forked_processes {
                 if let Err(e) = self.stop_isolated(&process_uuid) {
-                    error!("Failed to stop process {}: {}", process_uuid, e);
+                    warn!("Failed to stop process {}: {}", process_uuid, e);
                 }
             }
 
             // Stop the main process
-            if let Err(e) = self.stop_main() {
-                error!("Failed to stop main process: {}", e);
-            }
-
-            // Boot the main process again
-            self.boot_main()
-                .map_err(|e| format!("Failed to reboot main: {}", e))?;
-
-            // Return true to indicate that the environment was updated
-            Ok(true)
-        } else {
-            debug!("No changes in imports detected");
-            Ok(false)
+            self.stop_main()?;
         }
+
+        // Boot a new environment
+        self.boot_main()?;
+
+        info!("Environment updated successfully");
+        Ok(true)
+    }
+
+    //
+    // Isolated process management
+    //
+
+    /// Execute a function in the isolated environment. This should be called from the main thread (the one
+    /// that spawned our hotreloader) so we can get the local function and closure variables.
+    pub fn exec_isolated(&self, pickled_data: &str) -> Result<String, String> {
+        // Check if environment is initialized
+        let environment = self
+            .environment
+            .as_ref()
+            .ok_or_else(|| "Environment not initialized. Call boot_main first.".to_string())?;
+
+        // Send the code to the forked process
+        let mut env_guard = environment
+            .lock()
+            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+
+        // Create a ForkRequest message
+        let fork_request = ForkRequest {
+            code: pickled_data.to_string(),
+        };
+
+        let fork_json = serde_json::to_string(&Message::ForkRequest(fork_request))
+            .map_err(|e| format!("Failed to serialize fork request: {}", e))?;
+
+        // Send the message to the child process
+        writeln!(env_guard.stdin, "{}", fork_json)
+            .map_err(|e| format!("Failed to write to child stdin: {}", e))?;
+        env_guard
+            .stdin
+            .flush()
+            .map_err(|e| format!("Failed to flush child stdin: {}", e))?;
+
+        // Wait for response
+        let mut process_uuid = String::new();
+        let mut pid: Option<i32> = None;
+
+        for line in &mut env_guard.reader {
+            let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
+
+            // Try to parse the response as a Message
+            if let Ok(message) = serde_json::from_str::<Message>(&line) {
+                match message {
+                    Message::ForkResponse(response) => {
+                        process_uuid = process_uuid.clone(); // Keep UUID same, but set PID
+                        pid = Some(response.child_pid);
+                        debug!("Fork complete. UUID: {}, PID: {:?}", process_uuid, pid);
+                        break;
+                    }
+                    Message::ChildError(error) => {
+                        error!("Fork error: {}", error.error);
+                        return Err(format!("Fork error: {}", error.error));
+                    }
+                    _ => {
+                        // Log other message types
+                        debug!("Unexpected message: {}", line);
+                    }
+                }
+            } else {
+                // Log any non-message output
+                debug!("Non-message output: {}", line);
+            }
+        }
+
+        if process_uuid.is_empty() {
+            return Err("Failed to get process UUID from fork operation".to_string());
+        }
+
+        // Store the PID with its UUID
+        if let Some(pid_val) = pid {
+            env_guard
+                .forked_processes
+                .insert(process_uuid.clone(), pid_val);
+        }
+
+        Ok(process_uuid)
+    }
+
+    /// Stop an isolated process by UUID
+    pub fn stop_isolated(&self, process_uuid: &str) -> Result<bool, String> {
+        // Check if environment is initialized
+        let environment = self
+            .environment
+            .as_ref()
+            .ok_or_else(|| "Environment not initialized. Call boot_main first.".to_string())?;
+
+        info!("Stopping isolated process: {}", process_uuid);
+        let mut env_guard = environment
+            .lock()
+            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+
+        // Check if the process UUID exists
+        if !env_guard.forked_processes.contains_key(process_uuid) {
+            warn!("No forked process found with UUID: {}", process_uuid);
+            return Ok(false); // Nothing to stop
+        }
+
+        let pid = env_guard.forked_processes[process_uuid];
+        info!("Found process with PID: {}", pid);
+
+        // Try to kill the process by PID
+        unsafe {
+            if libc::kill(pid, libc::SIGTERM) == 0 {
+                info!("Successfully sent SIGTERM to PID: {}", pid);
+            } else {
+                let err = std::io::Error::last_os_error();
+                warn!("Failed to send SIGTERM to PID {}: {}", pid, err);
+
+                // Try to send SIGKILL
+                if libc::kill(pid, libc::SIGKILL) == 0 {
+                    info!("Successfully sent SIGKILL to PID: {}", pid);
+                } else {
+                    let err = std::io::Error::last_os_error();
+                    warn!("Failed to send SIGKILL to PID {}: {}", pid, err);
+                }
+            }
+        }
+
+        // Also send EXIT_REQUEST message to the process
+        // Create an ExitRequest message
+        let exit_request = ExitRequest::new();
+
+        let exit_json = serde_json::to_string(&Message::ExitRequest(exit_request))
+            .map_err(|e| format!("Failed to serialize exit request: {}", e))?;
+
+        // Send the message to the child process
+        if let Err(e) = writeln!(env_guard.stdin, "{}", exit_json) {
+            warn!("Failed to write exit request to child stdin: {}", e);
+            // We continue despite this error since we've already tried to kill the process
+        } else if let Err(e) = env_guard.stdin.flush() {
+            warn!("Failed to flush child stdin: {}", e);
+        }
+
+        // Remove the process from our map
+        env_guard.forked_processes.remove(process_uuid);
+        info!(
+            "Removed process UUID: {} from forked_processes map",
+            process_uuid
+        );
+
+        Ok(true)
+    }
+
+    /// Communicate with an isolated process to get its output
+    pub fn communicate_isolated(&self, process_uuid: &str) -> Result<Option<String>, String> {
+        // Check if environment is initialized
+        let environment = self
+            .environment
+            .as_ref()
+            .ok_or_else(|| "No environment available for communication".to_string())?;
+
+        let mut env_guard = environment
+            .lock()
+            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+
+        // Check if the process exists
+        if !env_guard.forked_processes.contains_key(process_uuid) {
+            return Err(format!("Process {} does not exist", process_uuid));
+        }
+
+        // Read from the process output
+        for line in &mut env_guard.reader {
+            let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
+            trace!("Read line: {}", line);
+
+            // Try to parse as a Message
+            let message = serde_json::from_str::<Message>(&line)
+                .map_err(|e| format!("Failed to deserialize message: {}", e))?;
+
+            match message {
+                Message::ChildComplete(complete) => {
+                    trace!("Received function result: {:?}", complete);
+                    return Ok(complete.result);
+                }
+                Message::ChildError(error) => {
+                    error!("Received function error: {:?}", error);
+                    return Err(error.error);
+                }
+                _ => {
+                    trace!("Received other message type: {:?}", message);
+                }
+            }
+        }
+
+        // If we get here, there was no output to read
+        Ok(None)
     }
 }
 
@@ -453,6 +491,7 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
+    use std::time::Duration;
     use tempfile::TempDir;
 
     // Helper function to create a temporary Python file
@@ -491,11 +530,9 @@ mod tests {
 
         let runner = ImportRunner {
             id: Uuid::new_v4().to_string(),
-            child: Arc::new(Mutex::new(python_cmd)),
-            stdin: Arc::new(Mutex::new(stdin)),
-            reader: Arc::new(Mutex::new(reader)),
-            forked_processes: Arc::new(Mutex::new(HashMap::new())),
+            environment: None,
             ast_manager,
+            first_scan: false,
         };
 
         Ok(runner)
@@ -518,7 +555,14 @@ mod tests {
 
         let runner = runner_result.unwrap();
         assert_eq!(runner.ast_manager.get_project_path(), dir_path);
-        assert!(runner.forked_processes.lock().unwrap().is_empty());
+        assert!(runner
+            .environment
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .forked_processes
+            .is_empty());
     }
 
     #[test]
@@ -535,7 +579,14 @@ mod tests {
         let mut runner = runner_result.unwrap();
 
         // Get the PID of the initial Python process
-        let initial_pid = runner.child.lock().unwrap().id();
+        let initial_pid = runner
+            .environment
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .child
+            .id();
         println!("Initial process PID: {:?}", initial_pid);
 
         // First, prime the system by calling process_all_py_files to establish a baseline
@@ -557,7 +608,14 @@ mod tests {
         );
 
         // Get the PID after update with no changes
-        let unchanged_pid = runner.child.lock().unwrap().id();
+        let unchanged_pid = runner
+            .environment
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .child
+            .id();
         println!("PID after no changes: {:?}", unchanged_pid);
 
         // Verify that the process was NOT restarted (PIDs should be the same)
@@ -584,7 +642,14 @@ mod tests {
         );
 
         // Get the PID of the new Python process
-        let new_pid = runner.child.lock().unwrap().id();
+        let new_pid = runner
+            .environment
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .child
+            .id();
         println!("New process PID after import changes: {:?}", new_pid);
 
         // Verify that the process was restarted (PIDs should be different)
@@ -679,7 +744,14 @@ mod tests {
 
         // Verify the process is in the forked_processes map
         {
-            let processes = runner.forked_processes.lock().unwrap();
+            let processes = runner
+                .environment
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .forked_processes
+                .clone();
             assert!(
                 processes.contains_key(&process_uuid),
                 "Process UUID should be in the forked_processes map"
@@ -703,7 +775,14 @@ mod tests {
 
         // Verify the process is no longer in the forked_processes map
         {
-            let processes = runner.forked_processes.lock().unwrap();
+            let processes = runner
+                .environment
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .forked_processes
+                .clone();
             assert!(
                 !processes.contains_key(&process_uuid),
                 "Process UUID should be removed from the forked_processes map after termination"

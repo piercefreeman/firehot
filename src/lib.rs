@@ -1,19 +1,13 @@
 use anstream::eprintln;
-use anyhow::{anyhow, Result};
 use log::{debug, error, info};
 use once_cell::sync::Lazy;
 use owo_colors::OwoColorize;
-use std::{
-    collections::{HashMap, HashSet},
-    io::{BufRead, BufReader},
-    process::{Child, Command, Stdio},
-    time::Instant,
-};
+use std::{collections::HashMap, time::Instant};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use uuid::Uuid;
 
 pub mod ast;
@@ -23,7 +17,7 @@ pub mod scripts;
 
 // Export types from messages and scripts for public use
 pub use messages::{ExitRequest, ForkRequest, Message};
-use scripts::{PYTHON_CALL_SCRIPT, PYTHON_LOADER_SCRIPT};
+use scripts::PYTHON_CALL_SCRIPT;
 
 // Replace RUNNERS and other new collections with IMPORT_RUNNERS
 static IMPORT_RUNNERS: Lazy<Mutex<HashMap<String, environment::ImportRunner>>> =
@@ -96,14 +90,7 @@ fn start_import_runner(_py: Python, project_name: &str, package_path: &str) -> P
 
     // Create the runner object
     info!("Creating environment with ID: {}", runner_id);
-    let runner = environment::ImportRunner {
-        id: runner_id.clone(),
-        child: Arc::new(Mutex::new(child)),
-        stdin: Arc::new(Mutex::new(stdin)),
-        reader: Arc::new(Mutex::new(lines_iter)),
-        forked_processes: Arc::new(Mutex::new(HashMap::new())),
-        ast_manager,
-    };
+    let mut runner = environment::ImportRunner::new(project_name, package_path);
 
     runner.boot_main().map_err(|e| {
         error!("Failed to boot main: {}", e);
