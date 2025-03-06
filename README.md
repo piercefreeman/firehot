@@ -37,5 +37,5 @@ uv run test-hotreload
 ## Unit tests
 
 ```bash
-cargo test --lib messages::tests
+cargo test
 ```
