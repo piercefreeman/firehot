@@ -375,7 +375,8 @@ mod tests {
 
         let reader = BufReader::new(stdout).lines();
 
-        let ast_manager = ProjectAstManager::new(project_dir);
+        // Use a default package name for tests
+        let ast_manager = ProjectAstManager::new("test_package", project_dir);
 
         let runner = ImportRunner {
             id: Uuid::new_v4().to_string(),
@@ -421,9 +422,6 @@ mod tests {
         assert!(runner_result.is_ok());
 
         let mut runner = runner_result.unwrap();
-
-        // Initialize package_name to ensure third-party detection works
-        runner.ast_manager.detect_package_name().unwrap();
 
         // Test updating environment
         let update_result = runner.update_environment();

@@ -59,35 +59,32 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
 /// Python module for hot reloading with isolated imports
 #[pymodule]
 fn hotreload(_py: Python, m: &PyModule) -> PyResult<()> {
-    // Register the module functions
+    // Environment (parent) management
     m.add_function(wrap_pyfunction!(start_import_runner, m)?)?;
-    m.add_function(wrap_pyfunction!(stop_import_runner, m)?)?;
-    m.add_function(wrap_pyfunction!(exec_isolated, m)?)?;
-    m.add_function(wrap_pyfunction!(stop_isolated, m)?)?;
-    m.add_function(wrap_pyfunction!(communicate_isolated, m)?)?;
-    m.add_function(wrap_pyfunction!(compute_import_delta, m)?)?;
     m.add_function(wrap_pyfunction!(update_environment, m)?)?;
+    m.add_function(wrap_pyfunction!(stop_import_runner, m)?)?;
+
+    // Isolated (child, post-fork) process management
+    m.add_function(wrap_pyfunction!(exec_isolated, m)?)?;
+    m.add_function(wrap_pyfunction!(communicate_isolated, m)?)?;
+    m.add_function(wrap_pyfunction!(stop_isolated, m)?)?;
 
     Ok(())
 }
 
 /// Initialize and start the import runner, returning a unique identifier
 #[pyfunction]
-fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
+fn start_import_runner(_py: Python, project_name: &str, package_path: &str) -> PyResult<String> {
     // Generate a unique ID for this runner
     let runner_id = Uuid::new_v4().to_string();
 
     // Create a new AST manager for this project
-    let mut ast_manager = ast::ProjectAstManager::new(package_path);
+    let mut ast_manager = ast::ProjectAstManager::new(project_name, package_path);
 
     // Process Python files to get initial imports
     let third_party_modules = ast_manager
         .process_all_py_files()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to process Python files: {}", e)))?;
-
-    let _package_name = ast_manager
-        .get_package_name()
-        .ok_or_else(|| PyRuntimeError::new_err("Could not determine package name"))?;
 
     // Spawn Python subprocess to load modules
     let mut child = spawn_python_loader(&third_party_modules)
@@ -158,27 +155,6 @@ fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
     runners.insert(runner_id.clone(), runner);
 
     Ok(runner_id)
-}
-
-/// Compute and return the delta of imports since the last check
-#[pyfunction]
-fn compute_import_delta(_py: Python, runner_id: &str) -> PyResult<(Vec<String>, Vec<String>)> {
-    let mut runners = IMPORT_RUNNERS.lock().unwrap();
-
-    let runner = runners.get_mut(runner_id).ok_or_else(|| {
-        PyRuntimeError::new_err(format!("No import runner found for ID: {}", runner_id))
-    })?;
-
-    let (added, removed) = runner
-        .ast_manager
-        .compute_import_delta()
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to compute import delta: {}", e)))?;
-
-    // Convert HashSet to Vec for PyO3
-    let added_vec: Vec<String> = added.into_iter().collect();
-    let removed_vec: Vec<String> = removed.into_iter().collect();
-
-    Ok((added_vec, removed_vec))
 }
 
 /// Update the environment by checking for import changes and restarting if necessary

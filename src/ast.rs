@@ -2,7 +2,6 @@ use anyhow::{anyhow, Result};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::Path,
 };
 use walkdir::WalkDir;
 
@@ -40,28 +39,26 @@ pub struct ProjectAstManager {
     file_hashes: HashMap<String, String>,
     /// Mapping of file paths to their imports. This includes both first party and third party imports.
     file_imports: HashMap<String, Vec<ImportInfo>>,
-    /// The detected package name, if any
-    package_name: Option<String>,
+    /// The name of the project
+    package_name: String,
     /// The root path of the project
     project_path: String,
 }
 
 impl ProjectAstManager {
     /// Create a new ProjectAstManager for the given project path
-    pub fn new(project_path: &str) -> Self {
+    pub fn new(project_name: &str, project_path: &str) -> Self {
         Self {
             file_hashes: HashMap::new(),
             file_imports: HashMap::new(),
-            package_name: None,
+            package_name: project_name.to_string(),
             project_path: project_path.to_string(),
         }
     }
 
-    /// Detect the package name for the project
-    pub fn detect_package_name(&mut self) -> Result<Option<String>> {
-        let path = Path::new(&self.project_path);
-        self.package_name = detect_package_name(path);
-        Ok(self.package_name.clone())
+    /// Get the project name
+    pub fn get_package_name(&self) -> &str {
+        &self.package_name
     }
 
     /// Get the project path
@@ -75,12 +72,6 @@ impl ProjectAstManager {
     pub fn process_all_py_files(&mut self) -> Result<HashSet<String>> {
         let mut third_party_imports = HashSet::new();
         println!("Processing all Python files in: {}", self.project_path);
-
-        // First, detect package name if not already detected
-        if self.package_name.is_none() {
-            self.detect_package_name()?;
-            println!("Detected package name: {:?}", self.package_name);
-        }
 
         // Walk through all files in the project
         for entry in WalkDir::new(&self.project_path)
@@ -124,7 +115,13 @@ impl ProjectAstManager {
     }
 
     /// Compute the delta of imports between the current state and the previous state
-    /// Returns (added, removed)
+    /// Since functions are brought into scope by loading the whole module, client callers
+    /// will only care about these deltas at the module level (versus the individual dependencies)
+    /// TODO: Return consistent level of each import so the environment can order them - this is nontrivial
+    /// because different files might have the imports in different places. We should first try
+    /// to come up with a DAG-like ordering and if a topographic sort isn't possible, then for
+    /// now return an error.
+    /// Returns (added modules, removed modules)
     pub fn compute_import_delta(&mut self) -> Result<(HashSet<String>, HashSet<String>)> {
         // Copy previous imports
         let previous_imports: HashSet<String> = self
@@ -150,11 +147,6 @@ impl ProjectAstManager {
             .collect();
 
         Ok((added, removed))
-    }
-
-    /// Get the package name
-    pub fn get_package_name(&self) -> Option<String> {
-        self.package_name.clone()
     }
 
     /// Process a single Python file and extract its imports
@@ -223,13 +215,9 @@ impl ProjectAstManager {
     /// Check if an import is a third-party import
     fn is_third_party_import(&self, imp: &ImportInfo) -> bool {
         println!("Checking if import is third party: {:?}", imp);
-        println!("Package name: {:?}", self.package_name);
+        println!("Package name: {}", self.package_name);
 
-        let is_third_party = !imp.is_relative
-            && !self
-                .package_name
-                .as_ref()
-                .map_or(false, |pkg| imp.module.starts_with(pkg));
+        let is_third_party = !imp.is_relative && !imp.module.starts_with(&self.package_name);
 
         println!("Is third party: {}", is_third_party);
         is_third_party
@@ -334,45 +322,6 @@ fn collect_imports_with_level(stmts: &[Stmt], level: u32) -> Vec<ImportInfo> {
     imports
 }
 
-/// Detect the current package name by looking for setup.py, pyproject.toml, or top-level __init__.py files
-fn detect_package_name(path: &Path) -> Option<String> {
-    // Try to find setup.py
-    for entry in WalkDir::new(path)
-        .max_depth(2) // Only check top-level and immediate subdirectories
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-    {
-        let file_path = entry.path();
-        if file_path.file_name().unwrap_or_default() == "setup.py" {
-            if let Ok(content) = fs::read_to_string(file_path) {
-                // Look for name='package_name' or name="package_name"
-                let name_re = regex::Regex::new(r#"name=["']([^"']+)["']"#).unwrap();
-                if let Some(captures) = name_re.captures(&content) {
-                    return Some(captures.get(1).unwrap().as_str().to_string());
-                }
-            }
-        } else if file_path.file_name().unwrap_or_default() == "pyproject.toml" {
-            if let Ok(content) = fs::read_to_string(file_path) {
-                // Look for name = "package_name" in [project] or [tool.poetry] section
-                // We need to add (?s) to handle multiline content
-                let name_re = regex::Regex::new(
-                    r#"(?s)(?:\[project\]|\[tool\.poetry\]).*?name\s*=\s*["']([^"']+)["']"#,
-                )
-                .unwrap();
-                if let Some(captures) = name_re.captures(&content) {
-                    return Some(captures.get(1).unwrap().as_str().to_string());
-                }
-            }
-        }
-    }
-
-    // If no setup.py or pyproject.toml found, use directory name as fallback
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(|s| s.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,9 +341,9 @@ mod tests {
 
     #[test]
     fn test_project_ast_manager_initialization() {
-        let manager = ProjectAstManager::new("/test/path");
+        let manager = ProjectAstManager::new("test_package", "/test/path");
         assert_eq!(manager.get_project_path(), "/test/path");
-        assert_eq!(manager.get_package_name(), None);
+        assert_eq!(manager.get_package_name(), "test_package");
     }
 
     #[test]
@@ -402,7 +351,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = create_temp_py_file(&temp_dir, "test.py", "print('hello')");
 
-        let manager = ProjectAstManager::new(temp_dir.path().to_str().unwrap());
+        let manager = ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap());
         let hash_result = manager.calculate_file_hash(file_path.to_str().unwrap());
 
         assert!(hash_result.is_ok());
@@ -521,7 +470,7 @@ mod tests {
         // after seeing the actual output structure
         assert!(!imports.is_empty());
 
-        // All these should be from imports
+        // All these should be relative from imports
         for import in &imports {
             assert_eq!(import.is_from_import, true);
             assert_eq!(import.is_relative, true);
@@ -583,7 +532,7 @@ def function():
     }
 
     #[test]
-    fn test_same_module_and_import_name() {
+    fn test_collect_same_module_and_import_name() {
         let python_code = "import time\nfrom time import time as time_func";
         let temp_dir = TempDir::new().unwrap();
         let file_path = create_temp_py_file(&temp_dir, "time_imports.py", python_code);
@@ -614,93 +563,8 @@ def function():
     }
 
     #[test]
-    fn test_detect_package_name_setup_py() {
-        let temp_dir = TempDir::new().unwrap();
-        let setup_content = r#"
-from setuptools import setup
-
-setup(
-    name='test_package',
-    version='0.1.0',
-    packages=['test_package'],
-)
-"#;
-        create_temp_py_file(&temp_dir, "setup.py", setup_content);
-
-        let package_name = detect_package_name(temp_dir.path());
-        assert_eq!(package_name, Some("test_package".to_string()));
-    }
-
-    #[test]
-    fn test_detect_package_name_pyproject_toml_project() {
-        let temp_dir = TempDir::new().unwrap();
-        let pyproject_content = r#"
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[project]
-name = "test_package_project"
-version = "0.1.0"
-"#;
-        // Write to a file within the temp directory
-        let file_path = temp_dir.path().join("pyproject.toml");
-        let mut file = File::create(&file_path).unwrap();
-        file.write_all(pyproject_content.as_bytes()).unwrap();
-
-        // For debugging
-        println!("Temp dir: {:?}", temp_dir.path());
-        println!("Content written to file: {}", pyproject_content);
-        println!("Detecting package name...");
-
-        let package_name = detect_package_name(temp_dir.path());
-        println!("Detected package name: {:?}", package_name);
-
-        assert_eq!(package_name, Some("test_package_project".to_string()));
-    }
-
-    #[test]
-    fn test_detect_package_name_pyproject_toml_poetry() {
-        let temp_dir = TempDir::new().unwrap();
-        let pyproject_content = r#"
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
-
-[tool.poetry]
-name = "test_package_poetry"
-version = "0.1.0"
-"#;
-        // Write to a file within the temp directory
-        let file_path = temp_dir.path().join("pyproject.toml");
-        let mut file = File::create(&file_path).unwrap();
-        file.write_all(pyproject_content.as_bytes()).unwrap();
-
-        // For debugging
-        println!("Temp dir: {:?}", temp_dir.path());
-        println!("Content written to file: {}", pyproject_content);
-        println!("Detecting package name...");
-
-        let package_name = detect_package_name(temp_dir.path());
-        println!("Detected package name: {:?}", package_name);
-
-        assert_eq!(package_name, Some("test_package_poetry".to_string()));
-    }
-
-    #[test]
-    fn test_detect_package_name_fallback() {
-        let temp_dir = TempDir::new().unwrap();
-        let dir_name = temp_dir.path().file_name().unwrap().to_str().unwrap();
-
-        let package_name = detect_package_name(temp_dir.path());
-        assert_eq!(package_name, Some(dir_name.to_string()));
-    }
-
-    #[test]
     fn test_is_third_party_import() {
-        let mut manager = ProjectAstManager::new("/test/path");
-        // Set package name for testing
-        manager.package_name = Some("my_package".to_string());
+        let manager = ProjectAstManager::new("my_package", "/test/path");
 
         // First-party absolute import (starts with package name)
         let first_party = ImportInfo {
@@ -736,10 +600,10 @@ version = "0.1.0"
     #[test]
     fn test_process_py_file() {
         let temp_dir = TempDir::new().unwrap();
-        let python_code = "import os\nfrom sys import path";
+        let python_code = "import os\nimport sys";
         let file_path = create_temp_py_file(&temp_dir, "test_file.py", python_code);
 
-        let mut manager = ProjectAstManager::new(temp_dir.path().to_str().unwrap());
+        let mut manager = ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap());
         let imports_result = manager.process_py_file(file_path.to_str().unwrap());
 
         assert!(imports_result.is_ok());
@@ -757,7 +621,7 @@ version = "0.1.0"
         let file_path = create_temp_py_file(&temp_dir, "test_cache.py", python_code);
         let path_str = file_path.to_str().unwrap();
 
-        let mut manager = ProjectAstManager::new(temp_dir.path().to_str().unwrap());
+        let mut manager = ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap());
 
         // First call should parse the file
         let _ = manager.process_py_file(path_str).unwrap();
@@ -796,18 +660,11 @@ version = "0.1.0"
         let file1_path = create_temp_py_file(&temp_dir, "file1.py", "import os\nimport requests");
         let _file2_path = create_temp_py_file(&temp_dir, "file2.py", "import sys\nimport flask");
 
-        let mut manager = ProjectAstManager::new(temp_dir.path().to_str().unwrap());
+        let mut manager = ProjectAstManager::new("testpkg", temp_dir.path().to_str().unwrap());
 
         // Initial processing
         let initial_imports = manager.process_all_py_files().unwrap();
         println!("Initial imports found: {:#?}", initial_imports);
-
-        // We're expecting third-party imports, so we need to set the package name
-        // Otherwise, all imports will be treated as third-party
-        manager.package_name = Some("testpkg".to_string());
-
-        // Re-process to get third-party imports with the package name set
-        let initial_imports = manager.process_all_py_files().unwrap();
 
         // Verify we have the expected number of third-party imports
         // os, requests, sys, flask should all be considered third-party
