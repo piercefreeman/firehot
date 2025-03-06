@@ -14,22 +14,20 @@ use rustpython_parser::ast::{
 };
 use rustpython_parser::{parse, Mode};
 
-// Add PyO3 imports for Python bindings
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-// Define our messages module
-pub mod messages;
-pub mod environment;
-pub mod scripts;
 pub mod ast;
+pub mod environment;
+pub mod messages;
+pub mod scripts;
 
 // Export types from messages and scripts for public use
-pub use messages::{Message, ForkRequest, ExitRequest};
-use scripts::{PYTHON_LOADER_SCRIPT, PYTHON_CALL_SCRIPT};
+pub use messages::{ExitRequest, ForkRequest, Message};
+use scripts::{PYTHON_CALL_SCRIPT, PYTHON_LOADER_SCRIPT};
 
 // Replace RUNNERS and other new collections with IMPORT_RUNNERS
 static IMPORT_RUNNERS: Lazy<Mutex<HashMap<String, environment::ImportRunner>>> =
@@ -42,10 +40,7 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
     // Create import code for Python to execute
     let mut import_lines = String::new();
     for module in modules {
-        import_lines.push_str(&format!(
-            "__import__('{}')\n",
-            module
-        ));
+        import_lines.push_str(&format!("__import__('{}')\n", module));
     }
 
     println!("Import lines: {}", import_lines);
@@ -89,17 +84,19 @@ fn hotreload(_py: Python, m: &PyModule) -> PyResult<()> {
 fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
     // Generate a unique ID for this runner
     let runner_id = Uuid::new_v4().to_string();
-    
+
     // Create a new AST manager for this project
     let mut ast_manager = ast::ProjectAstManager::new(package_path);
-    
+
     // Process Python files to get initial imports
-    let third_party_modules = ast_manager.process_all_py_files()
+    let third_party_modules = ast_manager
+        .process_all_py_files()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to process Python files: {}", e)))?;
 
-    let _package_name = ast_manager.get_package_name()
+    let _package_name = ast_manager
+        .get_package_name()
         .ok_or_else(|| PyRuntimeError::new_err("Could not determine package name"))?;
-    
+
     // Spawn Python subprocess to load modules
     let mut child = spawn_python_loader(&third_party_modules)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to spawn Python loader: {}", e)))?;
@@ -175,17 +172,20 @@ fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
 #[pyfunction]
 fn compute_import_delta(_py: Python, runner_id: &str) -> PyResult<(Vec<String>, Vec<String>)> {
     let mut runners = IMPORT_RUNNERS.lock().unwrap();
-    
-    let runner = runners.get_mut(runner_id)
-        .ok_or_else(|| PyRuntimeError::new_err(format!("No import runner found for ID: {}", runner_id)))?;
-    
-    let (added, removed) = runner.ast_manager.compute_import_delta()
+
+    let runner = runners.get_mut(runner_id).ok_or_else(|| {
+        PyRuntimeError::new_err(format!("No import runner found for ID: {}", runner_id))
+    })?;
+
+    let (added, removed) = runner
+        .ast_manager
+        .compute_import_delta()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to compute import delta: {}", e)))?;
-    
+
     // Convert HashSet to Vec for PyO3
     let added_vec: Vec<String> = added.into_iter().collect();
     let removed_vec: Vec<String> = removed.into_iter().collect();
-    
+
     Ok((added_vec, removed_vec))
 }
 
@@ -194,13 +194,15 @@ fn compute_import_delta(_py: Python, runner_id: &str) -> PyResult<(Vec<String>, 
 fn update_environment(_py: Python, runner_id: &str) -> PyResult<bool> {
     // Get the ImportRunner
     let mut runners = IMPORT_RUNNERS.lock().unwrap();
-    let runner = runners.get_mut(runner_id)
-        .ok_or_else(|| PyRuntimeError::new_err(format!("No import runner found with ID: {}", runner_id)))?;
-    
+    let runner = runners.get_mut(runner_id).ok_or_else(|| {
+        PyRuntimeError::new_err(format!("No import runner found with ID: {}", runner_id))
+    })?;
+
     // Update the environment using the runner's method
-    let updated = runner.update_environment()
+    let updated = runner
+        .update_environment()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to update environment: {}", e)))?;
-    
+
     Ok(updated)
 }
 
@@ -210,8 +212,10 @@ fn stop_import_runner(_py: Python, runner_id: &str) -> PyResult<()> {
     let mut runners = IMPORT_RUNNERS.lock().unwrap();
     if let Some(runner) = runners.remove(runner_id) {
         // Clean up resources
-        runner.stop_main().map_err(|e| PyRuntimeError::new_err(format!("Failed to stop import runner: {}", e)))?;
-        
+        runner
+            .stop_main()
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to stop import runner: {}", e)))?;
+
         Ok(())
     } else {
         Err(PyRuntimeError::new_err(format!(
@@ -262,9 +266,9 @@ fn exec_isolated<'py>(
 fn stop_isolated(_py: Python, runner_id: &str, process_uuid: &str) -> PyResult<bool> {
     let runners = IMPORT_RUNNERS.lock().unwrap();
     if let Some(runner) = runners.get(runner_id) {
-        runner.stop_isolated(process_uuid).map_err(|e| {
-            PyRuntimeError::new_err(format!("Failed to stop isolated process: {}", e))
-        })
+        runner
+            .stop_isolated(process_uuid)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to stop isolated process: {}", e)))
     } else {
         Err(PyRuntimeError::new_err(format!(
             "No import runner found with ID: {}",
