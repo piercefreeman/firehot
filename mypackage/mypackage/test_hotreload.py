@@ -28,13 +28,17 @@ def global_fn(msg: str, count: int) -> str:
     Returns:
         str: A completion message
     """
-    # The heavy dependencies should have already been imported by the main environment
+    # The heavy dependencies should have already been imported by the firehot environment
+    from os import getpid, getppid
+
     from mypackage.app import run_everything
 
     run_everything()
 
     for i in range(count):
         print(f"{i + 1}: {msg}")
+
+    print(f"Process ID: {getpid()}, Parent Process ID: {getppid()}")
     return f"Completed {count} iterations"
 
 
@@ -49,7 +53,9 @@ def main():
             f"{runner_name}: Imports have been loaded in an isolated process in {time.time() - start}s"
         )
 
-        for _ in range(2):
+        count_reloads = 100
+        group_start = time.time()
+        for _ in range(count_reloads):
             print("-" * 80)
             start = time.time()
 
@@ -66,3 +72,4 @@ def main():
             print("Communicating with the forked process...")
             result = runner.communicate_isolated(process_id)
             print(f"{runner_name} final result: {result} in {time.time() - start}s")
+        print(f"Completed {count_reloads} reloads in {time.time() - group_start}s")
