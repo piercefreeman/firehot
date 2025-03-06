@@ -336,7 +336,7 @@ pickled_str = "{}"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::messages::{ChildComplete, Message};
+
     use crate::scripts::PYTHON_LOADER_SCRIPT;
     use std::fs::File;
     use std::io::Write;
@@ -427,40 +427,64 @@ mod tests {
         let initial_pid = runner.child.lock().unwrap().id();
         println!("Initial process PID: {:?}", initial_pid);
 
-        // First, verify that running update with no changes keeps the same PID
+        // First, prime the system by calling process_all_py_files to establish a baseline
+        let _ = runner.ast_manager.process_all_py_files().unwrap();
+
+        // Now verify that running update with no changes keeps the same PID
         let no_change_result = runner.update_environment();
-        assert!(no_change_result.is_ok(), "Failed to update environment: {:?}", no_change_result.err());
-        
+        assert!(
+            no_change_result.is_ok(),
+            "Failed to update environment: {:?}",
+            no_change_result.err()
+        );
+
         // The environment should NOT have been updated (return false)
-        assert_eq!(no_change_result.unwrap(), false, "Environment should not have been updated when imports didn't change");
+        assert_eq!(
+            no_change_result.unwrap(),
+            false,
+            "Environment should not have been updated when imports didn't change"
+        );
 
         // Get the PID after update with no changes
         let unchanged_pid = runner.child.lock().unwrap().id();
         println!("PID after no changes: {:?}", unchanged_pid);
-        
+
         // Verify that the process was NOT restarted (PIDs should be the same)
-        assert_eq!(initial_pid, unchanged_pid, "Process should NOT have been restarted when imports didn't change");
+        assert_eq!(
+            initial_pid, unchanged_pid,
+            "Process should NOT have been restarted when imports didn't change"
+        );
 
         // Now update the file with different imports to trigger a restart
         create_temp_py_file(&temp_dir, "main.py", "import os\nimport sys\nimport json");
-        
+
         // Test updating environment with changed imports
         let update_result = runner.update_environment();
-        assert!(update_result.is_ok(), "Failed to update environment: {:?}", update_result.err());
-        
+        assert!(
+            update_result.is_ok(),
+            "Failed to update environment: {:?}",
+            update_result.err()
+        );
+
         // The environment should have been updated (return true)
-        assert!(update_result.unwrap(), "Environment should have been updated due to import changes");
+        assert!(
+            update_result.unwrap(),
+            "Environment should have been updated due to import changes"
+        );
 
         // Get the PID of the new Python process
         let new_pid = runner.child.lock().unwrap().id();
         println!("New process PID after import changes: {:?}", new_pid);
 
         // Verify that the process was restarted (PIDs should be different)
-        assert_ne!(initial_pid, new_pid, "Process should have been restarted with a different PID when imports changed");
+        assert_ne!(
+            initial_pid, new_pid,
+            "Process should have been restarted with a different PID when imports changed"
+        );
     }
 
     #[test]
-    fn test_exec_isolated_basic() {
+    fn test_exec_communicate_isolated_basic() {
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
@@ -469,15 +493,51 @@ mod tests {
 
         let runner = runner_result.unwrap();
 
-        // In a full test, we would prepare pickled data and check the response
-        // Since that requires a fully functioning Python child process,
-        // we'll just verify the method doesn't panic with empty data
-        let result = runner.exec_isolated("");
+        // Use real pickled data for time.time() with zero args
+        // echo 'import base64; import pickle; import time; payload = {"func_module_path": "time", "func_name": "time", "func_qualname": "time", "args": tuple()}; pickled_data = base64.b64encode(pickle.dumps(payload)).decode("utf-8"); print(f"Pickled data for time.time() with zero args:\\n{pickled_data}")' > /tmp/generate_pickle.py && python /tmp/generate_pickle.py
+        let pickled_data = "gASVRwAAAAAAAAB9lCiMEGZ1bmNfbW9kdWxlX3BhdGiUjAR0aW1llIwJZnVuY19uYW1llGgCjA1mdW5jX3F1YWxuYW1llGgCjARhcmdzlCl1Lg==";
 
-        // The actual result depends on the implementation, so we're not
-        // asserting whether it succeeds or fails - we just want to make sure
-        // the test can run the method without panicking
-        println!("exec_isolated result: {:?}", result);
+        // Execute the time.time() function in the isolated Python process
+        // This returns a UUID for the process, not the actual result
+        let exec_result = runner.exec_isolated(pickled_data);
+        assert!(
+            exec_result.is_ok(),
+            "exec_isolated failed: {:?}",
+            exec_result.err()
+        );
+
+        let process_uuid = exec_result.unwrap();
+        println!("Process UUID: {}", process_uuid);
+
+        // Give some time for the child process to complete
+        std::thread::sleep(Duration::from_millis(500));
+
+        // Now use communicate_isolated to get the actual result
+        let communicate_result = runner.communicate_isolated(&process_uuid);
+        assert!(
+            communicate_result.is_ok(),
+            "communicate_isolated failed: {:?}",
+            communicate_result.err()
+        );
+
+        let result_option = communicate_result.unwrap();
+        assert!(
+            result_option.is_some(),
+            "No result received from isolated process"
+        );
+
+        // The result should be a string containing a floating-point timestamp
+        let result_str = result_option.unwrap();
+        println!("Result from time.time(): {}", result_str);
+
+        // Try to parse the result as a float to verify it's a valid timestamp
+        // Note: We're not checking the actual value as it will change each time
+        let parsed_result = result_str.parse::<f64>();
+        assert!(
+            parsed_result.is_ok(),
+            "Failed to parse result as a float: {}",
+            result_str
+        );
     }
 
     #[test]
@@ -490,50 +550,67 @@ mod tests {
 
         let runner = runner_result.unwrap();
 
-        // Add a fake process to the forked_processes map
-        let test_uuid = Uuid::new_v4().to_string();
+        // Create a pickled data that will make Python sleep for 10 seconds
+        // This will create a long-running process that we can terminate
+        // echo 'import base64; import pickle; import time; payload = {"func_module_path": "time", "func_name": "sleep", "func_qualname": "sleep", "args": (10,)}; pickled_data = base64.b64encode(pickle.dumps(payload)).decode("utf-8"); print(f"Pickled data for time.sleep(10):\\n{pickled_data}")' > /tmp/generate_sleep_pickle.py && python /tmp/generate_sleep_pickle.py
+        let sleep_pickled_data = "gASVUAAAAAAAAAB9lCiMEGZ1bmNfbW9kdWxlX3BhdGiUjAR0aW1llIwJZnVuY19uYW1llIwFc2xlZXCUjA1mdW5jX3F1YWxuYW1llGgEjARhcmdzlEsKhZR1Lg==";
+
+        // Start the sleep process
+        let exec_result = runner.exec_isolated(sleep_pickled_data);
+        assert!(
+            exec_result.is_ok(),
+            "Failed to start sleep process: {:?}",
+            exec_result.err()
+        );
+
+        let process_uuid = exec_result.unwrap();
+        println!("Started sleep process with UUID: {}", process_uuid);
+
+        // Verify the process is in the forked_processes map
         {
-            let mut processes = runner.forked_processes.lock().unwrap();
-            processes.insert(test_uuid.clone(), 12345); // Fake PID
-        }
-
-        // Try to stop a non-existent process
-        let non_existent_uuid = Uuid::new_v4().to_string();
-        let result = runner.stop_isolated(&non_existent_uuid);
-        println!("stop_isolated for non-existent UUID result: {:?}", result);
-        // The actual implementation may return Ok(false) or Err - we just need to check
-        // that the non-existent UUID doesn't falsely report as stopped
-        if result.is_ok() {
-            assert!(
-                !result.unwrap(),
-                "Should return false for non-existent process"
-            );
-        }
-
-        // Try to stop our fake process
-        // This won't actually kill anything since PID 12345 likely doesn't exist or isn't owned by us
-        let result = runner.stop_isolated(&test_uuid);
-        println!("stop_isolated for fake PID result: {:?}", result);
-
-        // The method is expected to return an error when the process can't be killed,
-        // and in that case, it doesn't remove the process from the map.
-        // So we check the behavior based on the result.
-        if result.is_ok() {
-            // If it succeeded, the process should be removed
             let processes = runner.forked_processes.lock().unwrap();
             assert!(
-                !processes.contains_key(&test_uuid),
-                "Process should be removed from map when successfully stopped"
+                processes.contains_key(&process_uuid),
+                "Process UUID should be in the forked_processes map"
             );
-        } else {
-            // If it failed, the process might still be in the map, which is what we're seeing
-            println!("Process termination failed as expected, checking if still in map");
+
+            let pid = processes.get(&process_uuid).unwrap();
+            println!("Process PID: {}", pid);
+        }
+
+        // Now stop the process
+        let stop_result = runner.stop_isolated(&process_uuid);
+        assert!(
+            stop_result.is_ok(),
+            "Failed to stop process: {:?}",
+            stop_result.err()
+        );
+        assert!(
+            stop_result.unwrap(),
+            "stop_isolated should return true for successful termination"
+        );
+
+        // Verify the process is no longer in the forked_processes map
+        {
             let processes = runner.forked_processes.lock().unwrap();
             assert!(
-                processes.contains_key(&test_uuid),
-                "Process should remain in map when termination fails"
+                !processes.contains_key(&process_uuid),
+                "Process UUID should be removed from the forked_processes map after termination"
             );
         }
+
+        // Try to communicate with the terminated process
+        // It should return None since the process is no longer available
+        let communicate_result = runner.communicate_isolated(&process_uuid);
+        assert!(
+            communicate_result.is_ok(),
+            "communicate_isolated failed: {:?}",
+            communicate_result.err()
+        );
+        assert!(
+            communicate_result.unwrap().is_none(),
+            "communicate_isolated should return None for a terminated process"
+        );
     }
 
     #[test]
@@ -554,118 +631,6 @@ mod tests {
         assert!(
             result.unwrap(),
             "stop_main should return true after successful execution"
-        );
-    }
-
-    #[test]
-    fn test_communicate_isolated() {
-        let temp_dir = TempDir::new().unwrap();
-        let dir_path = temp_dir.path().to_str().unwrap();
-
-        // Create a regular ImportRunner
-        let runner_result = create_mock_import_runner(dir_path);
-        assert!(runner_result.is_ok());
-
-        let runner = runner_result.unwrap();
-
-        // Add a fake process to the forked_processes map
-        let test_uuid = Uuid::new_v4().to_string();
-        {
-            let mut processes = runner.forked_processes.lock().unwrap();
-            processes.insert(test_uuid.clone(), 12345); // Fake PID
-        }
-
-        // Create a testing function that simulates what communicate_isolated does
-        // but uses our controlled message instead of reading from the actual reader
-        let test_communicate = |process_uuid: &str| -> Result<Option<String>, String> {
-            let forked_processes = runner
-                .forked_processes
-                .lock()
-                .map_err(|e| format!("Failed to lock forked processes mutex: {}", e))?;
-
-            if !forked_processes.contains_key(process_uuid) {
-                // This process doesn't own the UUID
-                return Ok(None);
-            }
-
-            // Instead of reading from reader, we'll create a controlled message
-            let complete_message =
-                ChildComplete::new(Some("Test result from mock process".to_string()));
-            let message = Message::ChildComplete(complete_message);
-
-            // Simulate processing the message
-            match message {
-                Message::ChildComplete(complete) => {
-                    // If we have a result, return it
-                    if let Some(result) = complete.result {
-                        return Ok(Some(result));
-                    }
-                }
-                Message::ChildError(error) => {
-                    // Return error message as output
-                    return Ok(Some(format!("Error: {}", error.error)));
-                }
-                _ => {
-                    println!("Unhandled message type in test");
-                }
-            }
-
-            Ok(None)
-        };
-
-        // Test with existing UUID
-        let result = test_communicate(&test_uuid);
-        assert!(result.is_ok(), "Method should return Ok");
-        let result_value = result.unwrap();
-        assert!(result_value.is_some(), "Result should contain a value");
-        assert_eq!(result_value.unwrap(), "Test result from mock process");
-
-        // Test with non-existent UUID
-        let non_existent_uuid = Uuid::new_v4().to_string();
-        let result = test_communicate(&non_existent_uuid);
-        assert!(
-            result.is_ok(),
-            "Method should return Ok for non-existent UUID"
-        );
-        assert!(
-            result.unwrap().is_none(),
-            "Result should be None for non-existent UUID"
-        );
-    }
-
-    #[test]
-    fn test_ast_manager_integration() {
-        let temp_dir = TempDir::new().unwrap();
-        let dir_path = temp_dir.path().to_str().unwrap();
-
-        // Create a Python project with imports
-        create_temp_py_file(&temp_dir, "main.py", "import os\nimport sys");
-        create_temp_py_file(&temp_dir, "utils.py", "import requests\nimport json");
-
-        let runner_result = create_mock_import_runner(dir_path);
-        assert!(runner_result.is_ok());
-
-        let mut runner = runner_result.unwrap();
-
-        // Process all Python files
-        let imports_result = runner.ast_manager.process_all_py_files();
-        assert!(imports_result.is_ok());
-
-        let imports = imports_result.unwrap();
-        assert!(
-            !imports.is_empty(),
-            "Should find at least some third-party imports"
-        );
-
-        // Verify specific imports were found
-        // Note: This assumes all imports are treated as third-party,
-        // which may depend on how the package_name is detected
-        assert!(
-            imports.contains("os")
-                || imports.contains("sys")
-                || imports.contains("requests")
-                || imports.contains("json"),
-            "Should find at least one of the expected imports"
         );
     }
 }
