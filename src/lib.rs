@@ -29,31 +29,6 @@ use scripts::{PYTHON_CALL_SCRIPT, PYTHON_LOADER_SCRIPT};
 static IMPORT_RUNNERS: Lazy<Mutex<HashMap<String, environment::ImportRunner>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// Spawn a Python process that imports the given modules and then waits for commands on stdin.
-/// The Python process prints "IMPORTS_LOADED" to stdout once all imports are complete.
-/// After that, it will listen for commands on stdin, which can include fork requests and code to execute.
-fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
-    // Create import code for Python to execute
-    let mut import_lines = String::new();
-    for module in modules {
-        import_lines.push_str(&format!("__import__('{}')\n", module));
-    }
-
-    debug!("Module import injection code: {}", import_lines);
-
-    // Spawn Python process with all modules pre-imported
-    let child = Command::new("python")
-        .args(["-c", PYTHON_LOADER_SCRIPT])
-        .arg(import_lines)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow!("Failed to spawn Python process: {}", e))?;
-
-    Ok(child)
-}
-
 /// Python module for hot reloading with isolated imports
 #[pymodule]
 fn firehot(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -119,84 +94,6 @@ fn start_import_runner(_py: Python, project_name: &str, package_path: &str) -> P
         project_name.cyan().bold()
     );
 
-    let start_time = Instant::now();
-
-    // Create a new AST manager for this project
-    let mut ast_manager = ast::ProjectAstManager::new(project_name, package_path);
-    info!("Created AST manager for project: {}", project_name);
-
-    // Process Python files to get initial imports
-    info!("Processing Python files in: {}", package_path);
-    let third_party_modules = ast_manager
-        .process_all_py_files()
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to process Python files: {}", e)))?;
-
-    // Spawn Python subprocess to load modules
-    info!(
-        "Spawning Python subprocess to load {} modules",
-        third_party_modules.len()
-    );
-    let mut child = spawn_python_loader(&third_party_modules)
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to spawn Python loader: {}", e)))?;
-
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| PyRuntimeError::new_err("Failed to capture stdin for python process"))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| PyRuntimeError::new_err("Failed to capture stdout for python process"))?;
-
-    let reader = BufReader::new(stdout);
-    let mut lines_iter = reader.lines();
-
-    // Wait for the ImportComplete message
-    info!("Waiting for import completion...");
-    let mut imports_loaded = false;
-    for line in &mut lines_iter {
-        let line =
-            line.map_err(|e| PyRuntimeError::new_err(format!("Failed to read line: {}", e)))?;
-
-        // Parse the line as a message
-        if let Ok(message) = serde_json::from_str::<Message>(&line) {
-            match message {
-                Message::ImportComplete(_) => {
-                    info!("Imports loaded successfully");
-                    imports_loaded = true;
-                    break;
-                }
-                Message::ImportError(error) => {
-                    error!(
-                        "Import error: {}: {}",
-                        error.error,
-                        error.traceback.clone().unwrap_or_default()
-                    );
-                    return Err(PyRuntimeError::new_err(format!(
-                        "Import error: {}: {}",
-                        error.error,
-                        error.traceback.unwrap_or_default()
-                    )));
-                }
-                _ => {
-                    // Log other message types for debugging
-                    debug!("Received message: {}", line);
-                }
-            }
-        } else {
-            // If we can't parse it as a message, log it
-            debug!("Non-message output: {}", line);
-        }
-    }
-
-    if !imports_loaded {
-        error!("Python loader did not report successful imports");
-        return Err(PyRuntimeError::new_err(
-            "Python loader did not report successful imports",
-        ));
-    }
-
     // Create the runner object
     info!("Creating environment with ID: {}", runner_id);
     let runner = environment::ImportRunner {
@@ -211,29 +108,6 @@ fn start_import_runner(_py: Python, project_name: &str, package_path: &str) -> P
     // Store in global registry
     let mut runners = IMPORT_RUNNERS.lock().unwrap();
     runners.insert(runner_id.clone(), runner);
-
-    // Calculate total setup time and log completion
-    let elapsed = start_time.elapsed();
-    let elapsed_ms = elapsed.as_millis();
-
-    eprintln!(
-        "\n{} {} {} {}{} {}\n",
-        "✓".green().bold(),
-        "Import environment booted in".white().bold(),
-        elapsed_ms.to_string().yellow().bold(),
-        "ms".white().bold(),
-        if elapsed_ms > 1000 {
-            format!(
-                " {}",
-                format!("({:.2}s)", elapsed_ms as f64 / 1000.0)
-                    .cyan()
-                    .italic()
-            )
-        } else {
-            String::new()
-        },
-        format!("with ID: {}", runner_id).white().bold()
-    );
 
     Ok(runner_id)
 }
