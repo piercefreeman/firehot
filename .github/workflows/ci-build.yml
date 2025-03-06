@@ -105,10 +105,14 @@ jobs:
           path: dist/*.whl
 
   # Collate all wheels for PyPI upload
-  collate_wheels:
+  publish_wheels:
     needs: build_wheels
     runs-on: ubuntu-latest
     
+    permissions:
+      id-token: write
+      contents: read
+
     steps:
       - uses: actions/checkout@v3
       
