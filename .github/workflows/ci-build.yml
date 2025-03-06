@@ -66,19 +66,6 @@ jobs:
       - name: Run Cargo tests
         run: cargo test --lib --all
 
-  #
-  # Bump release version
-  # Our managed directory uses poetry for these dependencies but there's an issue
-  # with installing poetry on windows runners, so we use a global python install
-  # for the required dependencies
-  #
-  - name: Update version
-    if: startsWith(github.ref, 'refs/tags/v')
-    shell: bash
-    run: |
-      pip install packaging toml
-      python .github/scripts/update_version.py ${{ github.ref_name }}
-
   # Build maturin packages for each target OS
   build_wheels:
     needs: [check_run_condition, cargo_test]
@@ -88,7 +75,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+        python-version: ['3.10', '3.11', '3.12', '3.13']
     
     steps:
       - uses: actions/checkout@v3
@@ -107,7 +94,14 @@ jobs:
       
       - name: Install maturin
         run: pip install maturin
-      
+
+      - name: Update version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          pip install packaging toml
+          python .github/scripts/update_version.py ${{ github.ref_name }}
+
       - name: Build wheels
         run: maturin build --release --strip --out dist
       
