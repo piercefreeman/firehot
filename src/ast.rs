@@ -265,7 +265,7 @@ fn collect_imports_with_level(stmts: &[Stmt], level: u32) -> Vec<ImportInfo> {
                     imports.push(ImportInfo {
                         module: module_name.to_string(),
                         names: imported,
-                        is_relative: import_from.level.map_or(false, |level| level.to_u32() > 0),
+                        is_relative: import_from.level.is_some_and(|level| level.to_u32() > 0),
                         is_from_import: true,
                         import_level: level,
                     });
