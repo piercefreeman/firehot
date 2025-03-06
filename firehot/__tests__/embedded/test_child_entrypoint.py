@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from hotreload.embedded.types import SerializedCall
+from firehot.embedded.types import SerializedCall
 
 
 @pytest.fixture

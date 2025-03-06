@@ -2,13 +2,13 @@ import importlib.util
 from contextlib import contextmanager
 from pathlib import Path
 
-from hotreload.hotreload import (
+from firehot.firehot import (
     start_import_runner as start_import_runner_rs,
 )
-from hotreload.hotreload import (
+from firehot.firehot import (
     stop_import_runner as stop_import_runner_rs,
 )
-from hotreload.isolate import ImportRunner
+from firehot.isolate import ImportRunner
 
 
 def resolve_package_metadata(package: str) -> tuple[str, str]:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from hotreload.environment import resolve_package_metadata
+from firehot.environment import resolve_package_metadata
 
 
 @pytest.fixture

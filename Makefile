@@ -4,7 +4,7 @@
 all: lint
 
 # Package directories
-ROOT_DIR := ./hotreload/
+ROOT_DIR := ./firehot/
 MYPACKAGE_DIR := ./mypackage/mypackage/
 EXTERNAL_DIR := ./mypackage/external-package/
 PKG_DIRS := $(ROOT_DIR) $(MYPACKAGE_DIR) $(EXTERNAL_DIR)
