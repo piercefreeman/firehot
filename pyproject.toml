@@ -7,7 +7,7 @@ name = "firehot"
 version = "0.1.0"
 description = "Wicked fast hot reloading"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 classifiers = [
     "Programming Language :: Python :: 3",
