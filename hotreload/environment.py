@@ -1,5 +1,6 @@
 import importlib.util
 from contextlib import contextmanager
+from pathlib import Path
 
 from hotreload.hotreload import (
     start_import_runner as start_import_runner_rs,
@@ -8,6 +9,7 @@ from hotreload.hotreload import (
     stop_import_runner as stop_import_runner_rs,
 )
 from hotreload.isolate import ImportRunner
+
 
 def resolve_package_metadata(package: str) -> tuple[str, str]:
     """
@@ -27,7 +29,13 @@ def resolve_package_metadata(package: str) -> tuple[str, str]:
         else:
             raise ImportError(f"Could not determine the path for package '{package}'")
 
+    # We care about the root path, not a file. If we were returned __init__.py, we should
+    # use the directory instead.
+    if Path(package_path).is_file():
+        package_path = str(Path(package_path).parent)
+
     return package_path, package_name
+
 
 @contextmanager
 def isolate_imports(package: str):
