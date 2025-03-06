@@ -10,7 +10,7 @@ without sub-functions.
 import base64
 import inspect
 import pickle
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
 
@@ -18,10 +18,6 @@ if TYPE_CHECKING:
         pass
 
     args = (0,)
-
-# This will be passed in from rust
-func: Callable
-args: tuple | None
 
 func_module_path_raw = None
 

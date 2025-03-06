@@ -13,7 +13,9 @@ PKG_DIRS := $(ROOT_DIR) $(MYPACKAGE_DIR) $(EXTERNAL_DIR)
 # Usage: $(call run_pyright,<directory>)
 define run_pyright
 	@echo "\n=== Running pyright on $(1) ==="; \
-	(cd $(1) && uv run pyright) || { echo "FAILED: pyright in $(1)"; exit 1; }; \
+	(cd $(1) && echo '{"include": ["."], "exclude": [".."], "ignore": ["../"]}' > temp_pyright_config.json && \
+	uv run pyright --project temp_pyright_config.json && \
+	rm temp_pyright_config.json) || { echo "FAILED: pyright in $(1)"; exit 1; }; \
 	echo "=== pyright completed successfully for $(1) ===";
 endef
 
