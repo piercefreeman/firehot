@@ -135,6 +135,13 @@ jobs:
           mkdir -p dist_clean
           cp wheels/*.whl dist_clean/
       
+      - name: Update version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          pip install packaging toml
+          python .github/scripts/update_version.py ${{ github.ref_name }}
+
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
