@@ -2,21 +2,13 @@ use anyhow::{anyhow, Result};
 use once_cell::sync::Lazy;
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     io::{BufRead, BufReader},
-    path::Path,
     process::{Child, Command, Stdio},
 };
-use walkdir::WalkDir;
-
-use rustpython_parser::ast::{
-    Mod, Stmt, StmtAsyncFunctionDef, StmtClassDef, StmtFunctionDef, StmtIf, StmtWhile,
-};
-use rustpython_parser::{parse, Mode};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyDict;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 

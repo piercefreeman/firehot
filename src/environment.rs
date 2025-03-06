@@ -1,12 +1,8 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
-use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::thread;
+use std::io::{BufRead, BufReader, Write};
+use std::process::Child;
 use std::time::Duration;
 
 use libc;
@@ -14,10 +10,9 @@ use scripts::PYTHON_CHILD_SCRIPT;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-use crate::ast::{self, ProjectAstManager};
+use crate::ast::ProjectAstManager;
 use crate::messages::{ExitRequest, ForkRequest, Message};
 use crate::scripts;
-use std::collections::HashSet;
 
 /// Runner for isolated Python code execution
 pub struct ImportRunner {
@@ -257,7 +252,10 @@ pickled_str = "{}"
                 // Try to stop each process, but continue if one fails
                 match self.stop_isolated(uuid) {
                     Ok(_) => println!("Successfully stopped forked process {}", uuid),
-                    Err(e) => println!("Warning: Failed to stop forked process {}: {}", uuid, e),
+                    Err(e) => println!(
+                        "Warning: Failed to stop forked process {} ({}): {}",
+                        uuid, pid, e
+                    ),
                 }
             }
             forked_processes.clear();
@@ -279,12 +277,12 @@ pickled_str = "{}"
             let stdin = child
                 .stdin
                 .take()
-                .ok_or_else(|| format!("Failed to capture stdin for python process"))?;
+                .ok_or_else(|| "Failed to capture stdin for python process".to_string())?;
 
             let stdout = child
                 .stdout
                 .take()
-                .ok_or_else(|| format!("Failed to capture stdout for python process"))?;
+                .ok_or_else(|| "Failed to capture stdout for python process".to_string())?;
 
             let reader = BufReader::new(stdout);
             let mut lines_iter = reader.lines();
@@ -340,9 +338,10 @@ mod tests {
     use super::*;
     use crate::messages::{ChildComplete, Message};
     use crate::scripts::PYTHON_LOADER_SCRIPT;
-    use std::fs::{self, File};
+    use std::fs::File;
     use std::io::Write;
     use std::path::PathBuf;
+    use std::process::{Command, Stdio};
     use tempfile::TempDir;
 
     // Helper function to create a temporary Python file

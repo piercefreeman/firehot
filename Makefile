@@ -36,6 +36,7 @@ endef
 define run_rustfmt
 	@echo "\n=== Running rustfmt on $(1) ==="; \
 	(cd $(1) && cargo fmt) || { echo "FAILED: rustfmt in $(1)"; exit 1; }; \
+	(cd $(1) && cargo fix --allow-dirty) || { echo "FAILED: rustfix in $(1)"; exit 1; }; \
 	echo "=== rustfmt completed successfully for $(1) ===";
 endef
 

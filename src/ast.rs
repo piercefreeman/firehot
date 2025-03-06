@@ -1,11 +1,8 @@
 use anyhow::{anyhow, Result};
-use once_cell::sync::Lazy;
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::{BufRead, BufReader},
     path::Path,
-    process::{Child, Command, Stdio},
 };
 use walkdir::WalkDir;
 
@@ -14,9 +11,6 @@ use rustpython_parser::ast::{
 };
 use rustpython_parser::{parse, Mode};
 
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
 use sha2::{Digest, Sha256};
 
 /// A simple structure to hold information about a single module import definition.
@@ -375,7 +369,7 @@ fn detect_package_name(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
+
     use std::fs::{self, File};
     use std::io::Write;
     use std::path::PathBuf;
