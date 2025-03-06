@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::ast::ProjectAstManager;
 use crate::messages::{ExitRequest, ForkRequest, Message};
-use crate::scripts::PYTHON_LOADER_SCRIPT;
+use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
 
 /// Runtime environment for executing Python code
 pub struct Environment {
@@ -272,10 +272,16 @@ impl ImportRunner {
             .lock()
             .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
+        let exec_code = format!(
+            r#"
+pickled_str = "{}"
+{}
+            "#,
+            pickled_data, PYTHON_CHILD_SCRIPT,
+        );
+
         // Create a ForkRequest message
-        let fork_request = ForkRequest {
-            code: pickled_data.to_string(),
-        };
+        let fork_request = ForkRequest { code: exec_code };
 
         let fork_json = serde_json::to_string(&Message::ForkRequest(fork_request))
             .map_err(|e| format!("Failed to serialize fork request: {}", e))?;
@@ -289,7 +295,7 @@ impl ImportRunner {
             .map_err(|e| format!("Failed to flush child stdin: {}", e))?;
 
         // Wait for response
-        let mut process_uuid = String::new();
+        let mut process_uuid = Uuid::new_v4().to_string();
         let mut pid: Option<i32> = None;
 
         for line in &mut env_guard.reader {
@@ -418,23 +424,26 @@ impl ImportRunner {
         // Read from the process output
         for line in &mut env_guard.reader {
             let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
-            trace!("Read line: {}", line);
 
             // Try to parse as a Message
-            let message = serde_json::from_str::<Message>(&line)
-                .map_err(|e| format!("Failed to deserialize message: {}", e))?;
-
-            match message {
-                Message::ChildComplete(complete) => {
-                    trace!("Received function result: {:?}", complete);
-                    return Ok(complete.result);
-                }
-                Message::ChildError(error) => {
-                    error!("Received function error: {:?}", error);
-                    return Err(error.error);
-                }
-                _ => {
-                    trace!("Received other message type: {:?}", message);
+            match serde_json::from_str::<Message>(&line) {
+                Ok(message) => match message {
+                    Message::ChildComplete(complete) => {
+                        trace!("Received function result: {:?}", complete);
+                        return Ok(complete.result);
+                    }
+                    Message::ChildError(error) => {
+                        error!("Received function error: {:?}", error);
+                        return Err(error.error);
+                    }
+                    _ => {
+                        trace!("Received other message type: {:?}", message);
+                    }
+                },
+                Err(_) => {
+                    // If parsing fails, print the raw line with an "[isolate]" prefix.
+                    println!("[isolate] {}", line);
+                    continue;
                 }
             }
         }
@@ -473,12 +482,13 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
 mod tests {
     use super::*;
 
+    use crate::messages::ChildComplete;
     use crate::scripts::PYTHON_LOADER_SCRIPT;
     use std::fs::File;
     use std::io::Write;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
-    
+
     use tempfile::TempDir;
 
     // Helper function to create a temporary Python file
