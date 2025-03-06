@@ -105,6 +105,11 @@ fn start_import_runner(_py: Python, project_name: &str, package_path: &str) -> P
         ast_manager,
     };
 
+    runner.boot_main().map_err(|e| {
+        error!("Failed to boot main: {}", e);
+        PyRuntimeError::new_err(e)
+    })?;
+
     // Store in global registry
     let mut runners = IMPORT_RUNNERS.lock().unwrap();
     runners.insert(runner_id.clone(), runner);

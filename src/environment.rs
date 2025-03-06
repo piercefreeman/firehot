@@ -43,7 +43,7 @@ impl ImportRunner {
         }
     }
 
-    pub fn boot_environment(&self) -> Result<(), String> {
+    pub fn boot_main(&self) -> Result<(), String> {
         if !self.first_scan {
             // Process Python files to get initial imports. This baseline warms the cache by building
             // the index of file shas and their imports.
@@ -406,64 +406,9 @@ pickled_str = "{}"
                 error!("Failed to stop main process: {}", e);
             }
 
-            // Beautiful logging to indicate environment boot starting
-            eprintln!(
-                "\n{} {}\n",
-                "◆".cyan().bold(),
-                "Starting new environment process...".white().bold()
-            );
-
-            let start_time = Instant::now();
-
-            // Create a minimal Python process that can handle basic messages
-            let mut python_cmd = std::process::Command::new("python")
-                .args(["-c", crate::scripts::PYTHON_LOADER_SCRIPT])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("Failed to spawn Python process: {}", e))?;
-
-            let stdin = python_cmd
-                .stdin
-                .take()
-                .ok_or_else(|| "Failed to capture stdin".to_string())?;
-
-            let stdout = python_cmd
-                .stdout
-                .take()
-                .ok_or_else(|| "Failed to capture stdout".to_string())?;
-
-            let reader = BufReader::new(stdout).lines();
-
-            // Update the runner
-            self.child = Arc::new(Mutex::new(python_cmd));
-            self.stdin = Arc::new(Mutex::new(stdin));
-            self.reader = Arc::new(Mutex::new(reader));
-            self.forked_processes = Arc::new(Mutex::new(HashMap::new()));
-
-            // Calculate the boot time
-            let elapsed = start_time.elapsed();
-            let boot_time_ms = elapsed.as_millis();
-
-            // Beautiful logging indicating the process was booted
-            eprintln!(
-                "\n{} {} {} {}{}\n",
-                "✓".green().bold(),
-                "Environment process started in".white().bold(),
-                boot_time_ms.to_string().yellow().bold(),
-                "ms".white().bold(),
-                if boot_time_ms > 1000 {
-                    format!(
-                        " {}",
-                        format!("({:.2}s)", boot_time_ms as f64 / 1000.0)
-                            .cyan()
-                            .italic()
-                    )
-                } else {
-                    String::new()
-                }
-            );
+            // Boot the main process again
+            self.boot_main()
+                .map_err(|e| format!("Failed to reboot main: {}", e))?;
 
             // Return true to indicate that the environment was updated
             Ok(true)
