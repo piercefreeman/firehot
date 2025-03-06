@@ -1,4 +1,4 @@
-.PHONY: lint lint-ruff lint-pyright lint-hotreload lint-mypackage lint-external ci-lint ci-lint-ruff ci-lint-pyright ci-lint-hotreload ci-lint-mypackage ci-lint-external test-hotreload
+.PHONY: lint lint-ruff lint-pyright lint-hotreload lint-mypackage lint-external ci-lint ci-lint-ruff ci-lint-pyright ci-lint-hotreload ci-lint-mypackage ci-lint-external test-hotreload build-develop
 
 # Default target
 all: lint
@@ -127,6 +127,15 @@ test-hotreload:
 	(cd $(ROOT_DIR) && uv run pytest -vvv) || { echo "FAILED: tests in $(ROOT_DIR)"; exit 1; }
 	@echo "=== Tests completed successfully for hotreload package ==="
 
+# Development build target
+build-develop:
+	@echo "=== Building development version for mypackage ==="
+	cd mypackage && \
+	(cd .. && uv run maturin build) && \
+	rm -f uv.lock && \
+	uv sync
+	@echo "=== Development build completed successfully ==="
+
 # Show help
 help:
 	@echo "Available targets:"
@@ -146,3 +155,4 @@ help:
 	@echo "  ci-lint-pyright - Run pyright type checker only (all packages)"
 	@echo " "
 	@echo "  test-hotreload  - Run tests for the hotreload package"
+	@echo "  build-develop   - Build development version in mypackage directory"

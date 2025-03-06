@@ -1,6 +1,6 @@
 # Hot Reload
 
-A package to quickly hot reload large Python projects.
+A package to quickly hot reload large Python projects. Currently in development.
 
 ## Background
 
@@ -30,10 +30,7 @@ When code changes are made in your project, we will:
 To test how hotreload works with a real project, we bundle a `mypackage` and `external-package` library in this repo.
 
 ```bash
-cd mypackage
-(cd .. && uv run maturin build)
-rm uv.lock
-uv sync
+make
 uv run test-hotreload
 ```
 

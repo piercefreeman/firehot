@@ -49,7 +49,7 @@ def test_module_usage(dummy_module, call_serializer_file):
     dummy_module.dummy_func as the "func" global.
     """
     dummy_func = dummy_module.dummy_func
-    result = runpy.run_path(call_serializer_file, init_globals={"func": dummy_func})
+    result = runpy.run_path(call_serializer_file, init_globals={"func": dummy_func, "args": None})
 
     # In this case, dummy_func is defined in a proper module ("dummy_module"),
     # so get_func_module_path should return ("dummy_module", None),
@@ -77,10 +77,5 @@ def dummy_func():
     script_globals = runpy.run_path(str(script_file), run_name="__main__")
     dummy_func = script_globals["dummy_func"]
 
-    result = runpy.run_path(call_serializer_file, init_globals={"func": dummy_func})
-
-    # When the function is defined in an independent script, its __module__ is '__main__'.
-    # Therefore, get_func_module_path returns (None, <script file path>),
-    # and the call serializer file sets these to "null" and the absolute file path.
-    assert result["func_module_path"] == "null"
-    assert os.path.abspath(result["func_file_path"]) == os.path.abspath(str(script_file))
+    with pytest.raises(RuntimeError):
+        runpy.run_path(call_serializer_file, init_globals={"func": dummy_func})

@@ -30,13 +30,17 @@ if hasattr(func, "__module__"):
         try:
             # Get the file where the function is defined
             file_path = inspect.getfile(func)
-            raise Exception(
+            raise RuntimeError(
                 f"Function belongs to script, currently only modules are supported: {file_path}"
             )
         except (TypeError, ValueError):
             pass
 
-# Final string conversions, expected output values
+#
+# Exports
+# These variables are outputted into the local scope and read by Rust
+#
+
 func_module_path = func_module_path_raw if func_module_path_raw is not None else "null"
 
 pickled_data = base64.b64encode(pickle.dumps((func, args))).decode("utf-8")
