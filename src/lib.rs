@@ -236,11 +236,6 @@ fn exec_isolated<'py>(
 
     py.run(PYTHON_CALL_SCRIPT, None, Some(locals))?;
 
-    let func_module_path = locals
-        .get_item("func_module_path")
-        .ok_or_else(|| PyRuntimeError::new_err("Failed to get function module path"))?
-        .extract::<String>()?;
-
     // Get the pickled data - now it's a string because we decoded it in Python
     let pickled_data = locals
         .get_item("pickled_data")
@@ -250,7 +245,7 @@ fn exec_isolated<'py>(
     let runners = IMPORT_RUNNERS.lock().unwrap();
     if let Some(runner) = runners.get(runner_id) {
         // Convert Rust Result<String, String> to PyResult
-        match runner.exec_isolated(&func_module_path, &pickled_data) {
+        match runner.exec_isolated(&pickled_data) {
             Ok(result) => Ok(py.eval(&format!("'{}'", result), None, None)?),
             Err(err) => Err(PyRuntimeError::new_err(err)),
         }

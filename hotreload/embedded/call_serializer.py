@@ -13,6 +13,7 @@ import pickle
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from hotreload.embedded.types import SerializedCall
 
     def func(val: int):
         pass
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     args = (0,)
 
 func_module_path_raw = None
+func_file_path = "null"
 
 if hasattr(func, "__module__"):
     module_name = func.__module__
@@ -36,11 +38,18 @@ if hasattr(func, "__module__"):
         except (TypeError, ValueError):
             pass
 
+# Slightly more manual approach to have full control over module loading when we run the
+# function in our isolated environment.
+payload: "SerializedCall" = {
+    "func_module_path": func_module_path_raw,
+    "func_name": func.__name__,
+    "func_qualname": func.__qualname__,
+    "args": args,
+}
+
 #
 # Exports
 # These variables are outputted into the local scope and read by Rust
 #
 
-func_module_path = func_module_path_raw if func_module_path_raw is not None else "null"
-
-pickled_data = base64.b64encode(pickle.dumps((func, args))).decode("utf-8")
+pickled_data = base64.b64encode(pickle.dumps(payload)).decode("utf-8")

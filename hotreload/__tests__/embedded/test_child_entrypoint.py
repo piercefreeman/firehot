@@ -7,6 +7,8 @@ import sys
 
 import pytest
 
+from hotreload.embedded.types import SerializedCall
+
 
 @pytest.fixture
 def child_entrypoint_file(tmp_path):
@@ -35,19 +37,21 @@ def dummy_func():
     # Prepend tmp_path to sys.path so that dummy_module can be imported
     monkeypatch.syspath_prepend(str(tmp_path))
 
-    # Import the module normally to register it in sys.modules
+    # Make sure we actually have to load the module from scratch
     if "dummy_module" in sys.modules:
         del sys.modules["dummy_module"]
-    import dummy_module  # type: ignore - Now dummy_module is picklable
 
     # Prepare pickled string: pack (dummy_func, None)
-    data_tuple = (dummy_module.dummy_func, None)
-    pickled_bytes = pickle.dumps(data_tuple)
+    payload: SerializedCall = {
+        "func_module_path": "dummy_module",
+        "func_name": "dummy_func",
+        "args": None,
+    }
+    pickled_bytes = pickle.dumps(payload)
     pickled_str = base64.b64encode(pickled_bytes).decode("utf-8")
 
     # Prepare globals for the child entrypoint.
     entry_globals = {
-        "module_path": "dummy_module",
         "pickled_str": pickled_str,
     }
 

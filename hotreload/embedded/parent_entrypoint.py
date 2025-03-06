@@ -33,7 +33,6 @@ class MessageType(StrEnum):
     EXIT_REQUEST = "EXIT_REQUEST"
 
 
-@dataclass
 class MessageBase:
     name: MessageType
 

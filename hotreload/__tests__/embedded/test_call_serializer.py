@@ -1,8 +1,12 @@
+import base64
 import importlib.util
 import os
+import pickle
 import runpy
 
 import pytest
+
+from hotreload.embedded.types import SerializedCall
 
 
 @pytest.fixture
@@ -47,15 +51,22 @@ def test_module_usage(dummy_module, call_serializer_file):
 
     This test runs the call serializer file in a separate context, injecting
     dummy_module.dummy_func as the "func" global.
+
     """
     dummy_func = dummy_module.dummy_func
     result = runpy.run_path(call_serializer_file, init_globals={"func": dummy_func, "args": None})
 
-    # In this case, dummy_func is defined in a proper module ("dummy_module"),
-    # so get_func_module_path should return ("dummy_module", None),
-    # and the call serializer file converts None into "null".
-    assert result["func_module_path"] == "dummy_module"
-    assert result["func_file_path"] == "null"
+    # Check that pickled data is formatted correctly and contains function reference info
+    pickled_data = result["pickled_data"]
+    assert pickled_data is not None
+
+    # Decode and unpickle the data
+    serialized_data: SerializedCall = pickle.loads(base64.b64decode(pickled_data.encode("utf-8")))
+
+    # Check that we're using the module_func reference format
+    assert serialized_data["func_module_path"] == "dummy_module"
+    assert serialized_data["func_name"] == "dummy_func"
+    assert serialized_data["args"] is None
 
 
 def test_independent_script_usage(tmp_path, call_serializer_file):
@@ -65,6 +76,9 @@ def test_independent_script_usage(tmp_path, call_serializer_file):
 
     This test creates a temporary script that defines a dummy function, executes it as __main__,
     and then runs the call serializer file (in a separate context) with that function.
+
+    We don't support standalone scripts yet, so this should raise an exception.
+
     """
     script_code = """
 def dummy_func():

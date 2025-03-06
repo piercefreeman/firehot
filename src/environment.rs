@@ -33,21 +33,15 @@ pub struct ImportRunner {
 impl ImportRunner {
     /// Execute a function in the isolated environment. This should be called from the main thread (the one
     /// that spawned our hotreloader) so we can get the local function and closure variables.
-    pub fn exec_isolated(
-        &self, 
-        module_path: &str,
-        pickled_data: &str
-    ) -> Result<String, String> {
+    pub fn exec_isolated(&self, pickled_data: &str) -> Result<String, String> {
         // Create the Python execution code that will unpickle and run the function
         // Errors don't seem to get caught in the parent process, so we need to log them here
         let exec_code = format!(
             r#"
-module_path = "{}"
 pickled_str = "{}"
 
 {}
             "#, 
-            module_path,
             pickled_data,
             PYTHON_CHILD_SCRIPT,
         );
