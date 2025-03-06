@@ -35,10 +35,6 @@ use scripts::{PYTHON_LOADER_SCRIPT, PYTHON_CALL_SCRIPT};
 static IMPORT_RUNNERS: Lazy<Mutex<HashMap<String, environment::ImportRunner>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-// Store the mapping for AST managers
-static AST_MANAGERS: Lazy<Mutex<HashMap<String, ast::ProjectAstManager>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
 /// Spawn a Python process that imports the given modules and then waits for commands on stdin.
 /// The Python process prints "IMPORTS_LOADED" to stdout once all imports are complete.
 /// After that, it will listen for commands on stdin, which can include fork requests and code to execute.
@@ -83,6 +79,7 @@ fn hotreload(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(stop_isolated, m)?)?;
     m.add_function(wrap_pyfunction!(communicate_isolated, m)?)?;
     m.add_function(wrap_pyfunction!(compute_import_delta, m)?)?;
+    m.add_function(wrap_pyfunction!(update_environment, m)?)?;
 
     Ok(())
 }
@@ -103,9 +100,6 @@ fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
     let package_name = ast_manager.get_package_name()
         .ok_or_else(|| PyRuntimeError::new_err("Could not determine package name"))?;
     
-    // Store the AST manager for later use
-    AST_MANAGERS.lock().unwrap().insert(runner_id.clone(), ast_manager);
-
     // Spawn Python subprocess to load modules
     let mut child = spawn_python_loader(&third_party_modules)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to spawn Python loader: {}", e)))?;
@@ -167,6 +161,7 @@ fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
         stdin: Arc::new(Mutex::new(stdin)),
         reader: Arc::new(Mutex::new(lines_iter)),
         forked_processes: Arc::new(Mutex::new(HashMap::new())),
+        ast_manager,
     };
 
     // Store in global registry
@@ -179,12 +174,12 @@ fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
 /// Compute and return the delta of imports since the last check
 #[pyfunction]
 fn compute_import_delta(_py: Python, runner_id: &str) -> PyResult<(Vec<String>, Vec<String>)> {
-    let mut managers = AST_MANAGERS.lock().unwrap();
+    let mut runners = IMPORT_RUNNERS.lock().unwrap();
     
-    let ast_manager = managers.get_mut(runner_id)
-        .ok_or_else(|| PyRuntimeError::new_err(format!("No AST manager found for ID: {}", runner_id)))?;
+    let runner = runners.get_mut(runner_id)
+        .ok_or_else(|| PyRuntimeError::new_err(format!("No import runner found for ID: {}", runner_id)))?;
     
-    let (added, removed) = ast_manager.compute_import_delta()
+    let (added, removed) = runner.ast_manager.compute_import_delta()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to compute import delta: {}", e)))?;
     
     // Convert HashSet to Vec for PyO3
@@ -194,6 +189,21 @@ fn compute_import_delta(_py: Python, runner_id: &str) -> PyResult<(Vec<String>, 
     Ok((added_vec, removed_vec))
 }
 
+/// Update the environment by checking for import changes and restarting if necessary
+#[pyfunction]
+fn update_environment(_py: Python, runner_id: &str) -> PyResult<bool> {
+    // Get the ImportRunner
+    let mut runners = IMPORT_RUNNERS.lock().unwrap();
+    let runner = runners.get_mut(runner_id)
+        .ok_or_else(|| PyRuntimeError::new_err(format!("No import runner found with ID: {}", runner_id)))?;
+    
+    // Update the environment using the runner's method
+    let updated = runner.update_environment()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to update environment: {}", e)))?;
+    
+    Ok(updated)
+}
+
 /// Stop the import runner with the given ID
 #[pyfunction]
 fn stop_import_runner(_py: Python, runner_id: &str) -> PyResult<()> {
@@ -201,10 +211,6 @@ fn stop_import_runner(_py: Python, runner_id: &str) -> PyResult<()> {
     if let Some(runner) = runners.remove(runner_id) {
         // Clean up resources
         runner.stop_main().map_err(|e| PyRuntimeError::new_err(format!("Failed to stop import runner: {}", e)))?;
-        
-        // Also remove the AST manager
-        let mut ast_managers = AST_MANAGERS.lock().unwrap();
-        ast_managers.remove(runner_id);
         
         Ok(())
     } else {

@@ -72,6 +72,11 @@ impl ProjectAstManager {
         Ok(self.package_name.clone())
     }
 
+    /// Get the project path
+    pub fn get_project_path(&self) -> &str {
+        &self.project_path
+    }
+
     /// Process a single Python file and extract its imports
     fn process_py_file(&mut self, file_path: &str) -> Result<Vec<ImportInfo>> {
         // Calculate hash of the file content
