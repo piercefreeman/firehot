@@ -12,7 +12,7 @@ from firehot.embedded.types import SerializedCall
 
 @pytest.fixture
 def child_entrypoint_file(tmp_path):
-    spec = importlib.util.find_spec("hotreload.embedded.child_entrypoint")
+    spec = importlib.util.find_spec("firehot.embedded.child_entrypoint")
     if spec is not None and spec.origin and os.path.exists(spec.origin):
         return spec.origin
     raise Exception("Child entrypoint not found")

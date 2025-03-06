@@ -13,7 +13,7 @@ import pickle
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from hotreload.embedded.types import SerializedCall
+    from firehot.embedded.types import SerializedCall
 
     def func(val: int):
         pass
