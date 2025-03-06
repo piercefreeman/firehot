@@ -125,14 +125,14 @@ jobs:
         run: |
           mkdir -p wheels
           find dist -name "*.whl" -exec cp {} wheels/ \;
-          mkdir -p dist
-          cp wheels/*.whl dist/
+          mkdir -p dist_clean
+          cp wheels/*.whl dist_clean/
       
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: --out dist
+          args: --out dist_clean
       
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -143,14 +143,16 @@ jobs:
         run: pip install twine
       
       - name: Check wheel validity
-        run: twine check dist/*.whl dist/*.tar.gz
+        run: twine check dist_clean/*.whl dist_clean/*.tar.gz
       
       - uses: actions/upload-artifact@v4
         with:
           name: final_dist
-          path: dist/
+          path: dist_clean/
 
       # Only upload to PyPI on tags
       - name: Upload to PyPI
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: pypa/gh-action-pypi-publish@release/v1 
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist_clean/ 
