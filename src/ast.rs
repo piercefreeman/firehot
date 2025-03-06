@@ -14,6 +14,8 @@ use rustpython_parser::{parse, Mode};
 use sha2::{Digest, Sha256};
 
 /// A simple structure to hold information about a single module import definition.
+/// This represents one line of an import statement. If the same module is referenced
+/// from multiple lines, there will be multiple ImportInfo structs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportInfo {
     /// For an `import X`, this is "X". For a `from X import Y`, this is "X".
@@ -22,6 +24,8 @@ pub struct ImportInfo {
     pub names: Vec<String>,
     /// Whether this is a relative import (starts with . or ..)
     pub is_relative: bool,
+    /// Whether this is a simple import (import X) or a from import (from X import Y)
+    pub is_from_import: bool,
 }
 
 /// Manage AST parsing and import tracking for a project
@@ -244,6 +248,7 @@ pub fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
                             .unwrap_or_else(|| alias.name.clone())
                             .to_string()],
                         is_relative: false,
+                        is_from_import: false,
                     });
                 }
             }
@@ -269,6 +274,7 @@ pub fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
                         module: module_name.to_string(),
                         names: imported,
                         is_relative: import_from.level.map_or(false, |level| level.to_u32() > 0),
+                        is_from_import: true,
                     });
                 } else {
                     // Handle case where module is None (likely for relative imports like "from . import x")
@@ -294,6 +300,7 @@ pub fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
                             module: module_name,
                             names: imported,
                             is_relative: true,
+                            is_from_import: true,
                         });
                     }
                 }
@@ -384,22 +391,6 @@ mod tests {
     }
 
     #[test]
-    fn test_import_info_creation() {
-        let import_info = ImportInfo {
-            module: "module_name".to_string(),
-            names: vec!["name1".to_string(), "name2".to_string()],
-            is_relative: false,
-        };
-
-        assert_eq!(import_info.module, "module_name");
-        assert_eq!(
-            import_info.names,
-            vec!["name1".to_string(), "name2".to_string()]
-        );
-        assert_eq!(import_info.is_relative, false);
-    }
-
-    #[test]
     fn test_project_ast_manager_initialization() {
         let manager = ProjectAstManager::new("/test/path");
         assert_eq!(manager.get_project_path(), "/test/path");
@@ -443,10 +434,12 @@ mod tests {
         assert_eq!(imports[0].module, "os");
         assert_eq!(imports[0].names, vec!["os"]);
         assert_eq!(imports[0].is_relative, false);
+        assert_eq!(imports[0].is_from_import, false);
 
         assert_eq!(imports[1].module, "sys");
         assert_eq!(imports[1].names, vec!["sys"]);
         assert_eq!(imports[1].is_relative, false);
+        assert_eq!(imports[1].is_from_import, false);
     }
 
     #[test]
@@ -469,10 +462,12 @@ mod tests {
         assert_eq!(imports[0].module, "os");
         assert_eq!(imports[0].names, vec!["path"]);
         assert_eq!(imports[0].is_relative, false);
+        assert_eq!(imports[0].is_from_import, true);
 
         assert_eq!(imports[1].module, "sys");
         assert_eq!(imports[1].names, vec!["argv", "version"]);
         assert_eq!(imports[1].is_relative, false);
+        assert_eq!(imports[1].is_from_import, true);
     }
 
     #[test]
@@ -495,10 +490,12 @@ mod tests {
         assert_eq!(imports[0].module, "os");
         assert_eq!(imports[0].names, vec!["operating_system"]);
         assert_eq!(imports[0].is_relative, false);
+        assert_eq!(imports[0].is_from_import, false);
 
         assert_eq!(imports[1].module, "sys");
         assert_eq!(imports[1].names, vec!["arguments"]);
         assert_eq!(imports[1].is_relative, false);
+        assert_eq!(imports[1].is_from_import, true);
     }
 
     #[test]
@@ -523,6 +520,12 @@ mod tests {
         // For now, just check that we find something, we'll refine this test
         // after seeing the actual output structure
         assert!(!imports.is_empty());
+
+        // All these should be from imports
+        for import in &imports {
+            assert_eq!(import.is_from_import, true);
+            assert_eq!(import.is_relative, true);
+        }
     }
 
     #[test]
@@ -657,6 +660,7 @@ version = "0.1.0"
             module: "my_package.submodule".to_string(),
             names: vec!["function".to_string()],
             is_relative: false,
+            is_from_import: false,
         };
         assert!(!manager.is_third_party_import(&first_party));
 
@@ -665,6 +669,7 @@ version = "0.1.0"
             module: "submodule".to_string(),
             names: vec!["function".to_string()],
             is_relative: true,
+            is_from_import: false,
         };
         assert!(!manager.is_third_party_import(&relative));
 
@@ -673,6 +678,7 @@ version = "0.1.0"
             module: "requests".to_string(),
             names: vec!["get".to_string()],
             is_relative: false,
+            is_from_import: false,
         };
         assert!(manager.is_third_party_import(&third_party));
     }
@@ -777,5 +783,36 @@ version = "0.1.0"
 
         assert!(!removed.is_empty());
         assert!(removed.contains("requests"));
+    }
+
+    #[test]
+    fn test_same_module_and_import_name() {
+        let python_code = "import time\nfrom time import time as time_func";
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = create_temp_py_file(&temp_dir, "time_imports.py", python_code);
+
+        let source = fs::read_to_string(file_path).unwrap();
+        let parsed = parse(&source, Mode::Module, "time_imports.py").unwrap();
+
+        let stmts = match &parsed {
+            Mod::Module(module) => &module.body,
+            _ => panic!("Expected Module"),
+        };
+
+        let imports = collect_imports(stmts);
+
+        assert_eq!(imports.len(), 2);
+
+        // First import: "import time"
+        assert_eq!(imports[0].module, "time");
+        assert_eq!(imports[0].names, vec!["time"]);
+        assert_eq!(imports[0].is_relative, false);
+        assert_eq!(imports[0].is_from_import, false); // This is a simple import
+
+        // Second import: "from time import time as time_func"
+        assert_eq!(imports[1].module, "time");
+        assert_eq!(imports[1].names, vec!["time_func"]); // Should contain the alias
+        assert_eq!(imports[1].is_relative, false);
+        assert_eq!(imports[1].is_from_import, true); // This is a from import
     }
 }
