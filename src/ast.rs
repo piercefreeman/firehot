@@ -21,13 +21,17 @@ pub struct ImportInfo {
     /// For an `import X`, this is "X". For a `from X import Y`, this is "X".
     pub module: String,
     /// The names imported from that module. These represent the original functions
-    /// that are imported. We specifically do not include aliases here, because we
-    /// want to track the original functions.
+    /// that are imported. We specifically do not include aliases here, because these
+    /// are more useful to deduplicate superficial changes across imports.
     pub names: Vec<String>,
     /// Whether this is a relative import (starts with . or ..)
     pub is_relative: bool,
     /// Whether this is a simple import (import X) or a from import (from X import Y)
     pub is_from_import: bool,
+    /// Users sometimes nest package imports within functions to avoid circular imports
+    /// of initialization dependencies. We track the level of the import here so we can
+    /// make sure to load root packages before nested packages.
+    pub import_level: u32,
 }
 
 /// Manage AST parsing and import tracking for a project
@@ -233,8 +237,15 @@ impl ProjectAstManager {
 }
 
 /// Recursively traverse AST statements to collect import information.
-/// Absolute (level == 0) imports are considered third-party.
+/// This does a nested traversal though all the possible imports in a file, like those
+/// embedded within functions.
 pub fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
+    collect_imports_with_level(stmts, 0)
+}
+
+/// Internal function that tracks the nesting level of imports.
+/// Level 0 is the top level of the module, and it increases with each nesting.
+fn collect_imports_with_level(stmts: &[Stmt], level: u32) -> Vec<ImportInfo> {
     let mut imports = Vec::new();
     for stmt in stmts {
         println!("Processing statement: {:?}", stmt);
@@ -247,6 +258,7 @@ pub fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
                         names: vec![alias.name.to_string()],
                         is_relative: false,
                         is_from_import: false,
+                        import_level: level,
                     });
                 }
             }
@@ -267,6 +279,7 @@ pub fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
                         names: imported,
                         is_relative: import_from.level.map_or(false, |level| level.to_u32() > 0),
                         is_from_import: true,
+                        import_level: level,
                     });
                 } else {
                     // Handle case where module is None (likely for relative imports like "from . import x")
@@ -287,31 +300,32 @@ pub fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
                             names: imported,
                             is_relative: true,
                             is_from_import: true,
+                            import_level: level,
                         });
                     }
                 }
             }
             Stmt::If(inner) => {
                 let if_stmt: &StmtIf = inner;
-                imports.extend(collect_imports(&if_stmt.body));
-                imports.extend(collect_imports(&if_stmt.orelse));
+                imports.extend(collect_imports_with_level(&if_stmt.body, level + 1));
+                imports.extend(collect_imports_with_level(&if_stmt.orelse, level + 1));
             }
             Stmt::While(inner) => {
                 let while_stmt: &StmtWhile = inner;
-                imports.extend(collect_imports(&while_stmt.body));
-                imports.extend(collect_imports(&while_stmt.orelse));
+                imports.extend(collect_imports_with_level(&while_stmt.body, level + 1));
+                imports.extend(collect_imports_with_level(&while_stmt.orelse, level + 1));
             }
             Stmt::FunctionDef(inner) => {
                 let func_def: &StmtFunctionDef = inner;
-                imports.extend(collect_imports(&func_def.body));
+                imports.extend(collect_imports_with_level(&func_def.body, level + 1));
             }
             Stmt::AsyncFunctionDef(inner) => {
                 let func_def: &StmtAsyncFunctionDef = inner;
-                imports.extend(collect_imports(&func_def.body));
+                imports.extend(collect_imports_with_level(&func_def.body, level + 1));
             }
             Stmt::ClassDef(inner) => {
                 let class_def: &StmtClassDef = inner;
-                imports.extend(collect_imports(&class_def.body));
+                imports.extend(collect_imports_with_level(&class_def.body, level + 1));
             }
             _ => {}
         }
@@ -545,11 +559,27 @@ def function():
         // Should find all nested imports
         assert_eq!(imports.len(), 4);
 
-        let modules: Vec<String> = imports.iter().map(|i| i.module.clone()).collect();
-        assert!(modules.contains(&"math".to_string()));
-        assert!(modules.contains(&"datetime".to_string()));
-        assert!(modules.contains(&"json".to_string()));
-        assert!(modules.contains(&"re".to_string()));
+        // Organize imports by module name for easier verification
+        let mut imports_by_module: HashMap<String, &ImportInfo> = HashMap::new();
+        for import in &imports {
+            imports_by_module.insert(import.module.clone(), import);
+        }
+
+        // Verify modules are found
+        assert!(imports_by_module.contains_key("math"));
+        assert!(imports_by_module.contains_key("datetime"));
+        assert!(imports_by_module.contains_key("json"));
+        assert!(imports_by_module.contains_key("re"));
+
+        // Verify import levels
+        // math is inside a function, so level should be 1
+        assert_eq!(imports_by_module.get("math").unwrap().import_level, 1);
+        // datetime is inside a function and an if block, so level should be 2
+        assert_eq!(imports_by_module.get("datetime").unwrap().import_level, 2);
+        // json is inside a function, an if block, and a class, so level should be 3
+        assert_eq!(imports_by_module.get("json").unwrap().import_level, 3);
+        // re is inside a function, an if block, a class, and a method, so level should be 4
+        assert_eq!(imports_by_module.get("re").unwrap().import_level, 4);
     }
 
     #[test]
@@ -678,6 +708,7 @@ version = "0.1.0"
             names: vec!["function".to_string()],
             is_relative: false,
             is_from_import: false,
+            import_level: 0,
         };
         assert!(!manager.is_third_party_import(&first_party));
 
@@ -687,6 +718,7 @@ version = "0.1.0"
             names: vec!["function".to_string()],
             is_relative: true,
             is_from_import: false,
+            import_level: 0,
         };
         assert!(!manager.is_third_party_import(&relative));
 
@@ -696,6 +728,7 @@ version = "0.1.0"
             names: vec!["get".to_string()],
             is_relative: false,
             is_from_import: false,
+            import_level: 0,
         };
         assert!(manager.is_third_party_import(&third_party));
     }
