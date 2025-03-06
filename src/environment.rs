@@ -1,13 +1,16 @@
+use anstream::eprintln;
 use anyhow::Result;
 use log::{debug, error, info, trace, warn};
+use owo_colors::OwoColorize;
 use serde_json;
 use std::collections::HashMap;
 use std::io::{BufReader, Write};
 use std::process::Child;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use libc;
 use scripts::PYTHON_CHILD_SCRIPT;
+use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -249,8 +252,6 @@ pickled_str = "{}"
 
     /// Update the runner by checking for changes in imports and restarting if necessary
     pub fn update_environment(&mut self) -> Result<bool, String> {
-        // Compute the delta of imports
-        info!("Computing import delta for environment update");
         let (added, removed) = self
             .ast_manager
             .compute_import_delta()
@@ -287,6 +288,65 @@ pickled_str = "{}"
             if let Err(e) = self.stop_main() {
                 error!("Failed to stop main process: {}", e);
             }
+
+            // Beautiful logging to indicate environment boot starting
+            eprintln!(
+                "\n{} {}\n",
+                "◆".cyan().bold(),
+                "Starting new environment process...".white().bold()
+            );
+
+            let start_time = Instant::now();
+
+            // Create a minimal Python process that can handle basic messages
+            let mut python_cmd = std::process::Command::new("python")
+                .args(["-c", crate::scripts::PYTHON_LOADER_SCRIPT])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to spawn Python process: {}", e))?;
+
+            let stdin = python_cmd
+                .stdin
+                .take()
+                .ok_or_else(|| "Failed to capture stdin".to_string())?;
+
+            let stdout = python_cmd
+                .stdout
+                .take()
+                .ok_or_else(|| "Failed to capture stdout".to_string())?;
+
+            let reader = BufReader::new(stdout).lines();
+
+            // Update the runner
+            self.child = Arc::new(Mutex::new(python_cmd));
+            self.stdin = Arc::new(Mutex::new(stdin));
+            self.reader = Arc::new(Mutex::new(reader));
+            self.forked_processes = Arc::new(Mutex::new(HashMap::new()));
+
+            // Calculate the boot time
+            let elapsed = start_time.elapsed();
+            let boot_time_ms = elapsed.as_millis();
+
+            // Beautiful logging indicating the process was booted
+            eprintln!(
+                "\n{} {} {} {}{}\n",
+                "✓".green().bold(),
+                "Environment process started in".white().bold(),
+                boot_time_ms.to_string().yellow().bold(),
+                "ms".white().bold(),
+                if boot_time_ms > 1000 {
+                    format!(
+                        " {}",
+                        format!("({:.2}s)", boot_time_ms as f64 / 1000.0)
+                            .cyan()
+                            .italic()
+                    )
+                } else {
+                    String::new()
+                }
+            );
 
             // Return true to indicate that the environment was updated
             Ok(true)

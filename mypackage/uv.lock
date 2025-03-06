@@ -65,12 +65,11 @@ dev = [
 ]
 
 [[package]]
-name = "hotreload"
-version = "2020.6.12.15.23.48"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/7d/27/b7c635740d72a3a3af390fe6f8f4ff5e25e443ea4c87d021cd080f9f78be/hotreload-2020.6.12.15.23.48.tar.gz", hash = "sha256:4c5fe330221ee60af2506c33593f36b7cfdfe7bbe327438aae86e111857ae555", size = 2317 }
+name = "firehot"
+version = "0.1.0"
+source = { path = "../target/wheels/firehot-0.1.0-cp312-cp312-macosx_11_0_arm64.whl" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e7/c9/12e3ea5ce0e5d598fabd7c6801310af6ea63bbaf14af7b3f76e9cba2b609/hotreload-2020.6.12.15.23.48-py3-none-any.whl", hash = "sha256:3675e5de541dfe6385c35637036b1d703479a9e690d2de8305b2c1ba8c08ca7a", size = 3616 },
+    { filename = "firehot-0.1.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:f6e46d2414985a2e9f7d8ad489062e0647d0e13544238c885d3229e4debaaab3" },
 ]
 
 [[package]]
@@ -88,7 +87,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "external-package" },
-    { name = "hotreload" },
+    { name = "firehot" },
 ]
 
 [package.dev-dependencies]
@@ -102,7 +101,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "external-package", editable = "external-package" },
-    { name = "hotreload" },
+    { name = "firehot", path = "../target/wheels/firehot-0.1.0-cp312-cp312-macosx_11_0_arm64.whl" },
 ]
 
 [package.metadata.requires-dev]

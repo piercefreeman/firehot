@@ -1,10 +1,13 @@
+use anstream::eprintln;
 use anyhow::{anyhow, Result};
 use log::{debug, error, info};
 use once_cell::sync::Lazy;
+use owo_colors::OwoColorize;
 use std::{
     collections::{HashMap, HashSet},
     io::{BufRead, BufReader},
     process::{Child, Command, Stdio},
+    time::Instant,
 };
 
 use pyo3::exceptions::PyRuntimeError;
@@ -36,26 +39,17 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
         import_lines.push_str(&format!("__import__('{}')\n", module));
     }
 
-    info!(
-        "Built import lines for environment process: {}",
-        import_lines
-    );
+    debug!("Module import injection code: {}", import_lines);
 
-    // Write the embedded loader script to a file in the /tmp directory
-    info!("Writing Python loader script to /tmp directory");
-    let temp_path =
-        std::path::Path::new("/tmp").join(format!("hotreload_loader_{}.py", std::process::id()));
-    std::fs::write(&temp_path, PYTHON_LOADER_SCRIPT.as_bytes())
-        .map_err(|e| anyhow!("Failed to write Python loader script to /tmp file: {}", e))?;
-
-    // Launch the Python process with the loader script
+    // Spawn Python process with all modules pre-imported
     let child = Command::new("python")
-        .arg(&temp_path)
+        .args(["-c", PYTHON_LOADER_SCRIPT])
         .arg(import_lines)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| anyhow!("Failed to spawn python process: {}", e))?;
+        .map_err(|e| anyhow!("Failed to spawn Python process: {}", e))?;
 
     Ok(child)
 }
@@ -116,7 +110,16 @@ fn firehot(_py: Python, m: &PyModule) -> PyResult<()> {
 fn start_import_runner(_py: Python, project_name: &str, package_path: &str) -> PyResult<String> {
     // Generate a unique ID for this runner
     let runner_id = Uuid::new_v4().to_string();
-    info!("Starting import runner with ID: {}", runner_id);
+
+    // Beautiful logging for starting the import runner
+    eprintln!(
+        "{} {} {}",
+        "🔥".magenta().bold(),
+        "Initializing firehot for".white().bold(),
+        project_name.cyan().bold()
+    );
+
+    let start_time = Instant::now();
 
     // Create a new AST manager for this project
     let mut ast_manager = ast::ProjectAstManager::new(project_name, package_path);
@@ -195,7 +198,7 @@ fn start_import_runner(_py: Python, project_name: &str, package_path: &str) -> P
     }
 
     // Create the runner object
-    info!("Creating import runner with ID: {}", runner_id);
+    info!("Creating environment with ID: {}", runner_id);
     let runner = environment::ImportRunner {
         id: runner_id.clone(),
         child: Arc::new(Mutex::new(child)),
@@ -208,7 +211,29 @@ fn start_import_runner(_py: Python, project_name: &str, package_path: &str) -> P
     // Store in global registry
     let mut runners = IMPORT_RUNNERS.lock().unwrap();
     runners.insert(runner_id.clone(), runner);
-    info!("Import runner registered with ID: {}", runner_id);
+
+    // Calculate total setup time and log completion
+    let elapsed = start_time.elapsed();
+    let elapsed_ms = elapsed.as_millis();
+
+    eprintln!(
+        "\n{} {} {} {}{} {}\n",
+        "✓".green().bold(),
+        "Import environment booted in".white().bold(),
+        elapsed_ms.to_string().yellow().bold(),
+        "ms".white().bold(),
+        if elapsed_ms > 1000 {
+            format!(
+                " {}",
+                format!("({:.2}s)", elapsed_ms as f64 / 1000.0)
+                    .cyan()
+                    .italic()
+            )
+        } else {
+            String::new()
+        },
+        format!("with ID: {}", runner_id).white().bold()
+    );
 
     Ok(runner_id)
 }
@@ -244,7 +269,17 @@ fn update_environment(_py: Python, runner_id: &str) -> PyResult<bool> {
 /// Stop the import runner with the given ID
 #[pyfunction]
 fn stop_import_runner(_py: Python, runner_id: &str) -> PyResult<()> {
-    info!("Stopping import runner with ID: {}", runner_id);
+    // Beautiful logging for stopping the import runner
+    eprintln!(
+        "\n{} {}\n",
+        "⏹".yellow().bold(),
+        format!("Stopping import environment {}", runner_id)
+            .white()
+            .bold()
+    );
+
+    let start_time = Instant::now();
+
     let mut runners = IMPORT_RUNNERS.lock().unwrap();
     if let Some(runner) = runners.remove(runner_id) {
         // Clean up resources
@@ -254,11 +289,24 @@ fn stop_import_runner(_py: Python, runner_id: &str) -> PyResult<()> {
             PyRuntimeError::new_err(err_msg)
         })?;
 
-        info!("Import runner with ID {} stopped successfully", runner_id);
+        // Calculate and log cleanup time
+        let elapsed_ms = start_time.elapsed().as_millis();
+        eprintln!(
+            "{} {} {} {}",
+            "✓".green().bold(),
+            "Import runner stopped in".white().bold(),
+            elapsed_ms.to_string().yellow().bold(),
+            "ms".white().bold()
+        );
+
         Ok(())
     } else {
         let err_msg = format!("No import runner found with ID: {}", runner_id);
         error!("{}", err_msg);
+
+        // Log the error with owo_colors
+        eprintln!("\n{} {}\n", "✗".red().bold(), err_msg.white().bold());
+
         Err(PyRuntimeError::new_err(err_msg))
     }
 }

@@ -328,7 +328,7 @@ fn collect_imports_with_level(stmts: &[Stmt], level: u32) -> Vec<ImportInfo> {
             _ => {}
         }
     }
-    println!("Collected imports: {:?}", imports);
+    info!("Collected imports: {:?}", imports);
     imports
 }
 
