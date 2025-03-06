@@ -12,7 +12,6 @@ Run this with:
 """
 
 import time
-from pathlib import Path
 
 from hotreload import isolate_imports
 
@@ -41,12 +40,11 @@ def global_fn(msg: str, count: int) -> str:
 
 def main():
     """Run tasks with a specific runner."""
-    package_path = str(Path(".").absolute())
     runner_name = "[test_hotreload]"
 
     start = time.time()
     print(f"{runner_name}: This should be the main time expenditure...")
-    with isolate_imports(package_path) as runner:
+    with isolate_imports("mypackage") as runner:
         print(
             f"{runner_name}: Imports have been loaded in an isolated process in {time.time() - start}s"
         )

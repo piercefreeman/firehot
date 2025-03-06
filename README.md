@@ -9,7 +9,37 @@ varying degrees of global initialization when they're imported. They can also re
 step through one by one. Cached bytecode can help but it's not a silver bullet.
 
 Eventually your bootup can take 5-10s just to load these modules. Fine for a production service that's intended to run continuously, but
-horrible for a development experience when you have to reboot after changes.
+horrible for a development experience when you have to reboot after changes..
+
+## Python Usage
+
+```python
+from hotreload import isolate_imports
+from os import getpid, getppid
+
+def run_under_environment(value: int):
+   parent_pid = getppid()
+   print(f"Running with value: {value} (pid: {getpid()}, parent_pid: {parent_pid})")
+
+with isolate_imports("my_package") as environment:
+   # Each exec will be run in a new process with the environment isolated, inheriting
+   # the package's third party imports without having to re-import them from scratch.
+   context1 = environment.exec(run_under_environment, 1)
+   context2 = environment.exec(run_under_environment, 2)
+
+   # These can potentially be long running - to wait on the completion status, you can do:
+   result1 = environment.communicate_isolated(context1)
+   result2 = environment.communicate_isolated(context2)
+
+   # If you change the underlying file on disk to add an import, you can run update_environment.
+   # If the files on disk don't add any new imports, it will be a no-op and keep the current
+   # environment process running.
+   environment.update_environment()
+
+   # Subsequent execs will use the updated environment.
+   context3 = environment.exec(run_under_environment, 3)
+   result3 = environment.communicate_isolated(context3)
+```
 
 ## Architecture
 
@@ -37,5 +67,5 @@ uv run test-hotreload
 ## Unit tests
 
 ```bash
-cargo test --lib messages::tests
+cargo test
 ```
