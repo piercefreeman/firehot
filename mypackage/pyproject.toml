@@ -11,6 +11,14 @@ dependencies = [
     "external_package"
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pyright>=1.1.396",
+    "ruff>=0.0.292",
+]
+
 [project.scripts]
 test-hotreload = "mypackage.test_hotreload:main"
 
@@ -26,3 +34,11 @@ packages = ["mypackage"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "B"]
+ignore = ["E501"]

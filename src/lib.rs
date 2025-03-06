@@ -17,7 +17,7 @@ use rustpython_parser::{parse, Mode};
 // Add PyO3 imports for Python bindings
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -25,177 +25,15 @@ use uuid::Uuid;
 pub mod messages;
 pub mod environment;
 pub mod scripts;
+pub mod ast;
 
 // Export types from messages and scripts for public use
 pub use messages::{Message, ForkRequest, ExitRequest};
 use scripts::{PYTHON_LOADER_SCRIPT, PYTHON_CALL_SCRIPT};
 
-/// A simple structure to hold information about an import.
-#[derive(Debug)]
-struct ImportInfo {
-    /// For an `import X`, this is "X". For a `from X import Y`, this is "X".
-    module: String,
-    /// The names imported from that module.
-    names: Vec<String>,
-    /// Whether this is a relative import (starts with . or ..)
-    is_relative: bool,
-}
-
-/// Recursively traverse AST statements to collect import information.
-/// Absolute (level == 0) imports are considered third-party.
-fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
-    let mut imports = Vec::new();
-    for stmt in stmts {
-        match stmt {
-            Stmt::Import(import_stmt) => {
-                for alias in &import_stmt.names {
-                    imports.push(ImportInfo {
-                        module: alias.name.to_string(),
-                        names: vec![alias
-                            .asname
-                            .clone()
-                            .unwrap_or_else(|| alias.name.clone())
-                            .to_string()],
-                        is_relative: false,
-                    });
-                }
-            }
-            Stmt::ImportFrom(import_from) => {
-                if let Some(module_name) = &import_from.module {
-                    let imported = import_from
-                        .names
-                        .iter()
-                        .map(|alias| {
-                            alias
-                                .asname
-                                .clone()
-                                .unwrap_or_else(|| alias.name.clone())
-                                .to_string()
-                        })
-                        .collect();
-                    imports.push(ImportInfo {
-                        module: module_name.to_string(),
-                        names: imported,
-                        is_relative: import_from.level.map_or(false, |level| level.to_u32() > 0),
-                    });
-                }
-            }
-            Stmt::If(inner) => {
-                let if_stmt: &StmtIf = inner;
-                imports.extend(collect_imports(&if_stmt.body));
-                imports.extend(collect_imports(&if_stmt.orelse));
-            }
-            Stmt::While(inner) => {
-                let while_stmt: &StmtWhile = inner;
-                imports.extend(collect_imports(&while_stmt.body));
-                imports.extend(collect_imports(&while_stmt.orelse));
-            }
-            Stmt::FunctionDef(inner) => {
-                let func_def: &StmtFunctionDef = inner;
-                imports.extend(collect_imports(&func_def.body));
-            }
-            Stmt::AsyncFunctionDef(inner) => {
-                let func_def: &StmtAsyncFunctionDef = inner;
-                imports.extend(collect_imports(&func_def.body));
-            }
-            Stmt::ClassDef(inner) => {
-                let class_def: &StmtClassDef = inner;
-                imports.extend(collect_imports(&class_def.body));
-            }
-            _ => {}
-        }
-    }
-    imports
-}
-
-/// Detect the current package name by looking for setup.py, pyproject.toml, or top-level __init__.py files
-fn detect_package_name(path: &Path) -> Option<String> {
-    // Try to find setup.py
-    for entry in WalkDir::new(path)
-        .max_depth(2) // Only check top-level and immediate subdirectories
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-    {
-        let file_path = entry.path();
-        if file_path.file_name().unwrap_or_default() == "setup.py" {
-            if let Ok(content) = fs::read_to_string(file_path) {
-                // Look for name='package_name' or name="package_name"
-                let name_re = regex::Regex::new(r#"name=["']([^"']+)["']"#).unwrap();
-                if let Some(captures) = name_re.captures(&content) {
-                    return Some(captures.get(1).unwrap().as_str().to_string());
-                }
-            }
-        } else if file_path.file_name().unwrap_or_default() == "pyproject.toml" {
-            if let Ok(content) = fs::read_to_string(file_path) {
-                // Look for name = "package_name" in [project] or [tool.poetry] section
-                let name_re = regex::Regex::new(
-                    r#"(?:\[project\]|\[tool\.poetry\]).*?name\s*=\s*["']([^"']+)["']"#,
-                )
-                .unwrap();
-                if let Some(captures) = name_re.captures(&content) {
-                    return Some(captures.get(1).unwrap().as_str().to_string());
-                }
-            }
-        }
-    }
-
-    // If no setup.py or pyproject.toml found, use directory name as fallback
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(|s| s.to_string())
-}
-
-/// Given a path, scan for all Python files, parse them and extract the set of
-/// absolute (non-relative) modules that are imported.
-fn process_py_files(path: &Path) -> Result<(HashSet<String>, Option<String>)> {
-    let mut third_party_modules = HashSet::new();
-    let package_name = detect_package_name(path);
-
-    // For now assume that the package name is the directory name
-    // TODO: More generic support for pointing to the package where we want to sniff
-    // it for imports.
-    let package_path = path.join(package_name.clone().unwrap_or_default());
-
-    println!("Detected package name: {:?}", package_name);
-
-    for entry in WalkDir::new(package_path)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().is_file() && e.path().extension().map(|ext| ext == "py").unwrap_or(false)
-        })
-    {
-        println!("Processing file: {}", entry.path().display());
-        let file_path = entry.path();
-        let source = fs::read_to_string(file_path)?;
-        let parsed = parse(&source, Mode::Module, file_path.to_string_lossy().as_ref())
-            .map_err(|e| anyhow!("Failed to parse {}: {:?}", file_path.display(), e))?;
-        // Extract statements from the module. Note: `Mod::Module` now has named fields.
-        let stmts: &[Stmt] = match &parsed {
-            Mod::Module(module) => &module.body,
-            _ => {
-                return Err(anyhow!(
-                    "Unexpected AST format for module in file {}",
-                    file_path.display()
-                ))
-            }
-        };
-        let imports = collect_imports(stmts);
-        for imp in imports {
-            // Skip relative imports and imports of the current package
-            if !imp.is_relative
-                && !package_name
-                    .as_ref()
-                    .map_or(false, |pkg| imp.module.starts_with(pkg))
-            {
-                println!("Adding module: {}", imp.module);
-                third_party_modules.insert(imp.module);
-            }
-        }
-    }
-    Ok((third_party_modules, package_name))
-}
+// Replace RUNNERS and other new collections with IMPORT_RUNNERS
+static IMPORT_RUNNERS: Lazy<Mutex<HashMap<String, environment::ImportRunner>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Spawn a Python process that imports the given modules and then waits for commands on stdin.
 /// The Python process prints "IMPORTS_LOADED" to stdout once all imports are complete.
@@ -231,10 +69,6 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
     Ok(child)
 }
 
-// Replace single IMPORT_RUNNER with a registry of runners
-static IMPORT_RUNNERS: Lazy<Mutex<HashMap<String, environment::ImportRunner>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
 /// Python module for hot reloading with isolated imports
 #[pymodule]
 fn hotreload(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -244,6 +78,8 @@ fn hotreload(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(exec_isolated, m)?)?;
     m.add_function(wrap_pyfunction!(stop_isolated, m)?)?;
     m.add_function(wrap_pyfunction!(communicate_isolated, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_import_delta, m)?)?;
+    m.add_function(wrap_pyfunction!(update_environment, m)?)?;
 
     Ok(())
 }
@@ -251,15 +87,21 @@ fn hotreload(_py: Python, m: &PyModule) -> PyResult<()> {
 /// Initialize and start the import runner, returning a unique identifier
 #[pyfunction]
 fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
-    // Process Python files
-    let (modules, package_name) = process_py_files(Path::new(package_path))
+    // Generate a unique ID for this runner
+    let runner_id = Uuid::new_v4().to_string();
+    
+    // Create a new AST manager for this project
+    let mut ast_manager = ast::ProjectAstManager::new(package_path);
+    
+    // Process Python files to get initial imports
+    let third_party_modules = ast_manager.process_all_py_files()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to process Python files: {}", e)))?;
 
-    let _package_name =
-        package_name.ok_or_else(|| PyRuntimeError::new_err("Could not determine package name"))?;
-
+    let _package_name = ast_manager.get_package_name()
+        .ok_or_else(|| PyRuntimeError::new_err("Could not determine package name"))?;
+    
     // Spawn Python subprocess to load modules
-    let mut child = spawn_python_loader(&modules)
+    let mut child = spawn_python_loader(&third_party_modules)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to spawn Python loader: {}", e)))?;
 
     let stdin = child
@@ -312,9 +154,6 @@ fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
         ));
     }
 
-    // Generate a unique identifier for this runner
-    let runner_id = Uuid::new_v4().to_string();
-
     // Create the runner object
     let runner = environment::ImportRunner {
         id: runner_id.clone(),
@@ -322,6 +161,7 @@ fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
         stdin: Arc::new(Mutex::new(stdin)),
         reader: Arc::new(Mutex::new(lines_iter)),
         forked_processes: Arc::new(Mutex::new(HashMap::new())),
+        ast_manager,
     };
 
     // Store in global registry
@@ -331,6 +171,39 @@ fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
     Ok(runner_id)
 }
 
+/// Compute and return the delta of imports since the last check
+#[pyfunction]
+fn compute_import_delta(_py: Python, runner_id: &str) -> PyResult<(Vec<String>, Vec<String>)> {
+    let mut runners = IMPORT_RUNNERS.lock().unwrap();
+    
+    let runner = runners.get_mut(runner_id)
+        .ok_or_else(|| PyRuntimeError::new_err(format!("No import runner found for ID: {}", runner_id)))?;
+    
+    let (added, removed) = runner.ast_manager.compute_import_delta()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to compute import delta: {}", e)))?;
+    
+    // Convert HashSet to Vec for PyO3
+    let added_vec: Vec<String> = added.into_iter().collect();
+    let removed_vec: Vec<String> = removed.into_iter().collect();
+    
+    Ok((added_vec, removed_vec))
+}
+
+/// Update the environment by checking for import changes and restarting if necessary
+#[pyfunction]
+fn update_environment(_py: Python, runner_id: &str) -> PyResult<bool> {
+    // Get the ImportRunner
+    let mut runners = IMPORT_RUNNERS.lock().unwrap();
+    let runner = runners.get_mut(runner_id)
+        .ok_or_else(|| PyRuntimeError::new_err(format!("No import runner found with ID: {}", runner_id)))?;
+    
+    // Update the environment using the runner's method
+    let updated = runner.update_environment()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to update environment: {}", e)))?;
+    
+    Ok(updated)
+}
+
 /// Stop the import runner with the given ID
 #[pyfunction]
 fn stop_import_runner(_py: Python, runner_id: &str) -> PyResult<()> {
@@ -338,6 +211,7 @@ fn stop_import_runner(_py: Python, runner_id: &str) -> PyResult<()> {
     if let Some(runner) = runners.remove(runner_id) {
         // Clean up resources
         runner.stop_main().map_err(|e| PyRuntimeError::new_err(format!("Failed to stop import runner: {}", e)))?;
+        
         Ok(())
     } else {
         Err(PyRuntimeError::new_err(format!(
@@ -347,7 +221,7 @@ fn stop_import_runner(_py: Python, runner_id: &str) -> PyResult<()> {
     }
 }
 
-/// Execute code with a specific runner
+/// Execute a Python function in an isolated process
 #[pyfunction]
 fn exec_isolated<'py>(
     py: Python<'py>,
@@ -362,11 +236,6 @@ fn exec_isolated<'py>(
 
     py.run(PYTHON_CALL_SCRIPT, None, Some(locals))?;
 
-    let func_module_path = locals
-        .get_item("func_module_path")
-        .ok_or_else(|| PyRuntimeError::new_err("Failed to get function module path"))?
-        .extract::<String>()?;
-
     // Get the pickled data - now it's a string because we decoded it in Python
     let pickled_data = locals
         .get_item("pickled_data")
@@ -376,7 +245,7 @@ fn exec_isolated<'py>(
     let runners = IMPORT_RUNNERS.lock().unwrap();
     if let Some(runner) = runners.get(runner_id) {
         // Convert Rust Result<String, String> to PyResult
-        match runner.exec_isolated(&func_module_path, &pickled_data) {
+        match runner.exec_isolated(&pickled_data) {
             Ok(result) => Ok(py.eval(&format!("'{}'", result), None, None)?),
             Err(err) => Err(PyRuntimeError::new_err(err)),
         }
@@ -388,14 +257,14 @@ fn exec_isolated<'py>(
     }
 }
 
-/// Stop an isolated process by ID
+/// Stop an isolated process
 #[pyfunction]
 fn stop_isolated(_py: Python, runner_id: &str, process_uuid: &str) -> PyResult<bool> {
     let runners = IMPORT_RUNNERS.lock().unwrap();
     if let Some(runner) = runners.get(runner_id) {
-        runner
-            .stop_isolated(process_uuid)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to stop isolated process: {}", e)))
+        runner.stop_isolated(process_uuid).map_err(|e| {
+            PyRuntimeError::new_err(format!("Failed to stop isolated process: {}", e))
+        })
     } else {
         Err(PyRuntimeError::new_err(format!(
             "No import runner found with ID: {}",
@@ -404,7 +273,7 @@ fn stop_isolated(_py: Python, runner_id: &str, process_uuid: &str) -> PyResult<b
     }
 }
 
-/// Communicate with an isolated process to get its output
+/// Get output from an isolated process
 #[pyfunction]
 fn communicate_isolated(
     _py: Python,

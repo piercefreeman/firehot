@@ -6,32 +6,50 @@ the running process with pyo3, with an empty locals/global dict, so we should do
 without sub-functions.
 
 """
-from typing import Callable
-import pickle
+
 import base64
 import inspect
-import os.path
+import pickle
+from typing import TYPE_CHECKING
 
-# This will be passed in from rust
-func: Callable
-args: tuple | None
+if TYPE_CHECKING:
+    from hotreload.embedded.types import SerializedCall
+
+    def func(val: int):
+        pass
+
+    args = (0,)
 
 func_module_path_raw = None
+func_file_path = "null"
 
-if hasattr(func, '__module__'):
+if hasattr(func, "__module__"):
     module_name = func.__module__
-    if module_name != '__main__':
+    if module_name != "__main__":
         func_module_path_raw = module_name
     else:
         # Handle functions from directly executed scripts
         try:
             # Get the file where the function is defined
             file_path = inspect.getfile(func)
-            raise Exception(f"Function belongs to script, currently only modules are supported: {file_path}")
+            raise RuntimeError(
+                f"Function belongs to script, currently only modules are supported: {file_path}"
+            )
         except (TypeError, ValueError):
             pass
 
-# Final string conversions, expected output values
-func_module_path = func_module_path_raw if func_module_path_raw is not None else "null"
+# Slightly more manual approach to have full control over module loading when we run the
+# function in our isolated environment.
+payload: "SerializedCall" = {
+    "func_module_path": func_module_path_raw,
+    "func_name": func.__name__,
+    "func_qualname": func.__qualname__,
+    "args": args,
+}
 
-pickled_data = base64.b64encode(pickle.dumps((func, args))).decode('utf-8')
+#
+# Exports
+# These variables are outputted into the local scope and read by Rust
+#
+
+pickled_data = base64.b64encode(pickle.dumps(payload)).decode("utf-8")

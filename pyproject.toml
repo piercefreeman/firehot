@@ -20,12 +20,18 @@ classifiers = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
-    "black>=23.0.0",
-    "isort>=5.12.0",
-    "mypy>=1.0.0",
+    "pyright>=1.1.396",
     "ruff>=0.0.292",
     "maturin>=1.0,<2.0"
 ]
 
 [tool.maturin]
-features = ["pyo3/extension-module"] 
+features = ["pyo3/extension-module"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "B"]
+ignore = ["E501"]

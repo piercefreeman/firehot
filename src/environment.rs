@@ -1,12 +1,13 @@
 use anyhow::Result;
-use std::{
-    io::BufReader,
-    process::Child,
-    collections::HashMap,
-    time::Duration,
-};
-use std::io::Write;
-
+use serde::{Deserialize, Serialize};
+use serde_json;
+use std::collections::HashMap;
+use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 // Add PyO3 imports for Python bindings
 use std::sync::{Arc, Mutex};
@@ -16,6 +17,8 @@ use scripts::PYTHON_CHILD_SCRIPT;
 
 use crate::messages::{Message, ForkRequest, ExitRequest};
 use crate::scripts;
+use crate::ast::{self, ProjectAstManager};
+use std::collections::HashSet;
 
 /// Runner for isolated Python code execution
 pub struct ImportRunner {
@@ -24,26 +27,21 @@ pub struct ImportRunner {
     pub stdin: Arc<Mutex<std::process::ChildStdin>>,
     pub reader: Arc<Mutex<std::io::Lines<BufReader<std::process::ChildStdout>>>>,
     pub forked_processes: Arc<Mutex<HashMap<String, i32>>>, // Map of UUID to PID
+    pub ast_manager: ProjectAstManager, // Project AST manager for this environment
 }
 
 impl ImportRunner {
     /// Execute a function in the isolated environment. This should be called from the main thread (the one
     /// that spawned our hotreloader) so we can get the local function and closure variables.
-    pub fn exec_isolated(
-        &self, 
-        module_path: &str,
-        pickled_data: &str
-    ) -> Result<String, String> {
+    pub fn exec_isolated(&self, pickled_data: &str) -> Result<String, String> {
         // Create the Python execution code that will unpickle and run the function
         // Errors don't seem to get caught in the parent process, so we need to log them here
         let exec_code = format!(
             r#"
-module_path = "{}"
 pickled_str = "{}"
 
 {}
             "#, 
-            module_path,
             pickled_data,
             PYTHON_CHILD_SCRIPT,
         );
@@ -214,5 +212,101 @@ pickled_str = "{}"
         let _ = child.kill();
         let _ = child.wait();
         Ok(true)
+    }
+
+    /// Update the runner by checking for changes in imports and restarting if necessary
+    pub fn update_environment(&mut self) -> Result<bool, String> {
+        // Compute the delta of imports
+        let (added, removed) = self.ast_manager.compute_import_delta()
+            .map_err(|e| format!("Failed to compute import delta: {}", e))?;
+
+        println!("Added: {:?}", added);
+        println!("Removed: {:?}", removed);
+
+        // Check if there are any changes in imports
+        if !added.is_empty() || !removed.is_empty() {
+            println!("Detected changes in imports:");
+            if !added.is_empty() {
+                println!("Added imports: {:?}", added);
+            }
+            if !removed.is_empty() {
+                println!("Removed imports: {:?}", removed);
+            }
+
+            // Attempt to stop any existing forked processes
+            let mut forked_processes = self.forked_processes.lock().unwrap();
+            for (uuid, pid) in forked_processes.iter() {
+                // Try to stop each process, but continue if one fails
+                match self.stop_isolated(uuid) {
+                    Ok(_) => println!("Successfully stopped forked process {}", uuid),
+                    Err(e) => println!("Warning: Failed to stop forked process {}: {}", uuid, e),
+                }
+            }
+            forked_processes.clear();
+            drop(forked_processes); // Release the lock
+
+            // Get all the current third-party modules
+            let third_party_modules = self.ast_manager.process_all_py_files()
+                .map_err(|e| format!("Failed to process Python files: {}", e))?;
+
+            // Stop the current main process
+            self.stop_main()?;
+
+            // Create and spawn a new Python loader process
+            let mut child = crate::spawn_python_loader(&third_party_modules)
+                .map_err(|e| format!("Failed to spawn Python loader: {}", e))?;
+
+            let stdin = child.stdin.take()
+                .ok_or_else(|| format!("Failed to capture stdin for python process"))?;
+
+            let stdout = child.stdout.take()
+                .ok_or_else(|| format!("Failed to capture stdout for python process"))?;
+
+            let reader = BufReader::new(stdout);
+            let mut lines_iter = reader.lines();
+
+            // Wait for the ImportComplete message
+            let mut imports_loaded = false;
+            for line in &mut lines_iter {
+                let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
+
+                // Parse the line as a message
+                if let Ok(message) = serde_json::from_str::<Message>(&line) {
+                    match message {
+                        Message::ImportComplete(_) => {
+                            imports_loaded = true;
+                            break;
+                        }
+                        Message::ImportError(error) => {
+                            return Err(format!(
+                                "Import error: {}: {}",
+                                error.error,
+                                error.traceback.unwrap_or_default()
+                            ));
+                        }
+                        _ => {
+                            // Print other message types for debugging
+                            println!("Received message: {}", line);
+                        }
+                    }
+                } else {
+                    // If we can't parse it as a message, log it
+                    println!("Non-message output: {}", line);
+                }
+            }
+
+            if !imports_loaded {
+                return Err("Python loader did not report successful imports".to_string());
+            }
+
+            // Update the runner with the new process
+            *self.child.lock().unwrap() = child;
+            *self.stdin.lock().unwrap() = stdin;
+            *self.reader.lock().unwrap() = lines_iter;
+
+            return Ok(true); // Environment was updated
+        }
+
+        Ok(false) // No changes, environment not updated
     }
 }
