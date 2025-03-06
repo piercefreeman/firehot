@@ -43,6 +43,26 @@ with isolate_imports("my_package") as environment:
    result3 = environment.communicate_isolated(context3)
 ```
 
+## Logging
+
+By default, Firehot logs at the `warn` level, but you can adjust this by setting the `FIREHOT_LOG_LEVEL` environment variable. Most of these logs come from the Rust code.
+
+Available log levels (from most to least verbose):
+- `trace`: Extremely detailed information, useful for debugging specific issues
+- `debug`: Detailed information useful during development
+- `info`: General information about what's happening (default)
+- `warn`: Warning messages for potential issues
+- `error`: Error messages for actual problems
+
+Example usage:
+```bash
+# Set to debug level for more detailed logs
+FIREHOT_LOG_LEVEL=debug python your_script.py
+
+# Set to error level for minimal logs
+FIREHOT_LOG_LEVEL=error python your_script.py
+```
+
 ## Architecture
 
 You launch Firehot by pointing it to your package name, which we resolve internally to a disk path that contains your code. From there, our Rust logic takes over. The pipeline will parse this directory recursively for all Python files, then parse the code's AST to determine which imports are used by your project.

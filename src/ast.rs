@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use log::{debug, info, trace};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -48,6 +49,10 @@ pub struct ProjectAstManager {
 impl ProjectAstManager {
     /// Create a new ProjectAstManager for the given project path
     pub fn new(project_name: &str, project_path: &str) -> Self {
+        debug!(
+            "Creating new ProjectAstManager for {} at {}",
+            project_name, project_path
+        );
         Self {
             file_hashes: HashMap::new(),
             file_imports: HashMap::new(),
@@ -71,7 +76,7 @@ impl ProjectAstManager {
     /// but will only return third-party imports.
     pub fn process_all_py_files(&mut self) -> Result<HashSet<String>> {
         let mut third_party_imports = HashSet::new();
-        println!("Processing all Python files in: {}", self.project_path);
+        info!("Processing all Python files in: {}", self.project_path);
 
         // Walk through all files in the project
         for entry in WalkDir::new(&self.project_path)
@@ -88,29 +93,26 @@ impl ProjectAstManager {
                 let path_str = path.to_str().ok_or_else(|| {
                     anyhow::anyhow!("Failed to convert path to string: {:?}", path)
                 })?;
-                println!("Processing Python file: {}", path_str);
+                debug!("Processing Python file: {}", path_str);
 
                 // Process the file
                 let imports = self.process_py_file(path_str)?;
-                println!("Found imports in {}: {:?}", path_str, imports);
+                debug!("Found {} imports in {}", imports.len(), path_str);
 
                 // Add third-party imports to the result
                 for import in &imports {
                     if self.is_third_party_import(import) {
-                        println!("Found third-party import: {:?}", import);
+                        debug!("Found third-party import: {:?}", import);
                         third_party_imports.insert(import.module.clone());
                     } else {
-                        println!("Skipping first-party import: {:?}", import);
+                        trace!("Skipping first-party import: {:?}", import);
                     }
                 }
             }
         }
 
-        println!(
-            "Found {} third-party imports: {:?}",
-            third_party_imports.len(),
-            third_party_imports
-        );
+        info!("Found {} third-party imports", third_party_imports.len());
+        trace!("Third-party imports: {:?}", third_party_imports);
         Ok(third_party_imports)
     }
 
@@ -146,12 +148,13 @@ impl ProjectAstManager {
             .cloned()
             .collect();
 
+        debug!("Import delta - added: {:?}, removed: {:?}", added, removed);
         Ok((added, removed))
     }
 
     /// Process a single Python file and extract its imports
     fn process_py_file(&mut self, file_path: &str) -> Result<Vec<ImportInfo>> {
-        println!("process_py_file called for: {}", file_path);
+        debug!("Processing Python file: {}", file_path);
 
         // Calculate hash of the file content
         let new_hash = self.calculate_file_hash(file_path)?;
@@ -160,7 +163,7 @@ impl ProjectAstManager {
         if let Some(old_hash) = self.file_hashes.get(file_path) {
             if old_hash == &new_hash {
                 // File hasn't changed, return cached imports
-                println!("File hasn't changed, using cached imports");
+                debug!("File {} hasn't changed, using cached imports", file_path);
                 return Ok(self
                     .file_imports
                     .get(file_path)
@@ -170,9 +173,9 @@ impl ProjectAstManager {
         }
 
         // File is new or has changed, parse it
-        println!("Parsing file: {}", file_path);
+        debug!("Parsing file: {}", file_path);
         let source = fs::read_to_string(file_path)?;
-        println!("File content:\n{}", source);
+        trace!("File content size: {} bytes", source.len());
 
         let parsed = parse(&source, Mode::Module, file_path)
             .map_err(|e| anyhow!("Failed to parse {}: {:?}", file_path, e))?;
@@ -180,7 +183,11 @@ impl ProjectAstManager {
         // Extract statements from the module
         let stmts: &[Stmt] = match &parsed {
             Mod::Module(module) => {
-                println!("Extracted {} statements from module", module.body.len());
+                debug!(
+                    "Extracted {} statements from {}",
+                    module.body.len(),
+                    file_path
+                );
                 &module.body
             }
             _ => {
@@ -193,7 +200,7 @@ impl ProjectAstManager {
 
         // Collect imports
         let imports = collect_imports(stmts);
-        println!("Collected {} imports from {}", imports.len(), file_path);
+        debug!("Collected {} imports from {}", imports.len(), file_path);
 
         // Update caches
         self.file_hashes.insert(file_path.to_string(), new_hash);
@@ -209,17 +216,19 @@ impl ProjectAstManager {
         let mut hasher = Sha256::new();
         hasher.update(&content);
         let hash = hasher.finalize();
-        Ok(format!("{:x}", hash))
+        let hash_str = format!("{:x}", hash);
+        trace!("Calculated hash for {}: {}", file_path, hash_str);
+        Ok(hash_str)
     }
 
     /// Check if an import is a third-party import
     fn is_third_party_import(&self, imp: &ImportInfo) -> bool {
-        println!("Checking if import is third party: {:?}", imp);
-        println!("Package name: {}", self.package_name);
+        trace!("Checking if import is third party: {:?}", imp);
+        trace!("Package name: {}", self.package_name);
 
         let is_third_party = !imp.is_relative && !imp.module.starts_with(&self.package_name);
 
-        println!("Is third party: {}", is_third_party);
+        trace!("Is third party: {}", is_third_party);
         is_third_party
     }
 }
@@ -236,10 +245,10 @@ pub fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
 fn collect_imports_with_level(stmts: &[Stmt], level: u32) -> Vec<ImportInfo> {
     let mut imports = Vec::new();
     for stmt in stmts {
-        println!("Processing statement: {:?}", stmt);
+        trace!("Processing statement: {:?}", stmt);
         match stmt {
             Stmt::Import(import_stmt) => {
-                println!("Found import statement: {:?}", import_stmt);
+                debug!("Found import statement at level {}", level);
                 for alias in &import_stmt.names {
                     imports.push(ImportInfo {
                         module: alias.name.to_string(),
@@ -251,8 +260,8 @@ fn collect_imports_with_level(stmts: &[Stmt], level: u32) -> Vec<ImportInfo> {
                 }
             }
             Stmt::ImportFrom(import_from) => {
-                println!("Found import from statement: {:?}", import_from);
-                println!(
+                debug!("Found import from statement: {:?}", import_from);
+                debug!(
                     "Level: {:?}, Module: {:?}",
                     import_from.level, import_from.module
                 );
@@ -271,7 +280,7 @@ fn collect_imports_with_level(stmts: &[Stmt], level: u32) -> Vec<ImportInfo> {
                     });
                 } else {
                     // Handle case where module is None (likely for relative imports like "from . import x")
-                    println!("Module is None, handling relative import");
+                    debug!("Module is None, handling relative import");
                     if import_from.level.is_some() && import_from.level.unwrap().to_u32() > 0 {
                         // This is a relative import
                         let imported: Vec<String> = import_from
@@ -282,7 +291,7 @@ fn collect_imports_with_level(stmts: &[Stmt], level: u32) -> Vec<ImportInfo> {
                         // Use a placeholder module name based on the relative level
                         let rel_level = import_from.level.unwrap().to_u32();
                         let module_name = ".".repeat(rel_level as usize);
-                        println!("Created relative import with module: {}", module_name);
+                        debug!("Created relative import with module: {}", module_name);
                         imports.push(ImportInfo {
                             module: module_name,
                             names: imported,
@@ -318,7 +327,7 @@ fn collect_imports_with_level(stmts: &[Stmt], level: u32) -> Vec<ImportInfo> {
             _ => {}
         }
     }
-    println!("Collected imports: {:?}", imports);
+    info!("Collected imports: {:?}", imports);
     imports
 }
 

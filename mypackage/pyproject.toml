@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 
 dependencies = [
-    "hotreload",
+    "firehot",
     "external_package"
 ]
 
