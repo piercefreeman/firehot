@@ -1,13 +1,13 @@
 from typing import Any, Callable
 from uuid import UUID
 
-from hotreload.hotreload import (
+from firehot.firehot import (
     communicate_isolated as communicate_isolated_rs,
 )
-from hotreload.hotreload import (
+from firehot.firehot import (
     exec_isolated as exec_isolated_rs,
 )
-from hotreload.hotreload import (
+from firehot.firehot import (
     update_environment as update_environment_rs,
 )
 

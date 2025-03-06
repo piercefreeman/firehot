@@ -6,12 +6,12 @@ import runpy
 
 import pytest
 
-from hotreload.embedded.types import SerializedCall
+from firehot.embedded.types import SerializedCall
 
 
 @pytest.fixture
 def call_serializer_file(tmp_path):
-    spec = importlib.util.find_spec("hotreload.embedded.call_serializer")
+    spec = importlib.util.find_spec("firehot.embedded.call_serializer")
     if spec is not None and spec.origin and os.path.exists(spec.origin):
         return spec.origin
     raise Exception("Child entrypoint not found")

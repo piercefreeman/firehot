@@ -13,7 +13,7 @@ import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from hotreload.embedded.types import SerializedCall
+    from firehot.embedded.types import SerializedCall
 
     module_path = "path"
     pickled_str = "pickled_str"

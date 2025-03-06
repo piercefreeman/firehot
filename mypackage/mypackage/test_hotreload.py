@@ -13,7 +13,7 @@ Run this with:
 
 import time
 
-from hotreload import isolate_imports
+from firehot import isolate_imports
 
 
 # A global function to demonstrate execution in a forked process

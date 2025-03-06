@@ -58,7 +58,7 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
 
 /// Python module for hot reloading with isolated imports
 #[pymodule]
-fn hotreload(_py: Python, m: &PyModule) -> PyResult<()> {
+fn firehot(_py: Python, m: &PyModule) -> PyResult<()> {
     // Environment (parent) management
     m.add_function(wrap_pyfunction!(start_import_runner, m)?)?;
     m.add_function(wrap_pyfunction!(update_environment, m)?)?;

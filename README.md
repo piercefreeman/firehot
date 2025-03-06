@@ -1,4 +1,6 @@
-# Hot Reload
+# Firehot
+
+![Firehot](./media/header.png)
 
 A package to quickly hot reload large Python projects. Currently in development.
 
@@ -9,12 +11,12 @@ varying degrees of global initialization when they're imported. They can also re
 step through one by one. Cached bytecode can help but it's not a silver bullet.
 
 Eventually your bootup can take 5-10s just to load these modules. Fine for a production service that's intended to run continuously, but
-horrible for a development experience when you have to reboot after changes..
+horrible for a development experience when you have to reboot after changes. Firehot solves this by importing dependencies once, then forking your environment for each exec. Think of it like building a docker image then executing it whenever you make a change.
 
 ## Python Usage
 
 ```python
-from hotreload import isolate_imports
+from firehot import isolate_imports
 from os import getpid, getppid
 
 def run_under_environment(value: int):
@@ -43,21 +45,21 @@ with isolate_imports("my_package") as environment:
 
 ## Architecture
 
-When launched, our Rust pipeline will parse code's AST and determine which imports are used by your project.
+You launch Firehot by pointing it to your package name, which we resolve internally to a disk path that contains your code. From there, our Rust logic takes over. The pipeline will parse this directory recursively for all Python files, then parse the code's AST to determine which imports are used by your project.
 
-It will then launch a continuously running process that caches only the 3rd party packages/modules that are used by your project. We
-think of this as the "template" or "parent" process because it establishes the environment that will be used to run your code. None of your
+It will then launch a continuously running process that caches only the 3rd party packages/modules. We
+think of this as the "template" process because it establishes the environment that will be used to run your code. None of your
 user code is run in this process.
 
 When code changes are made in your project, we will:
 
 - Determine if your changes affected the imported packages
 - If not, we can fork the parent process and pass in your user code. This will load all modules from scratch, but because importlib caches the modules in global space, it will be a no-op because of the template.
-- If so, we will tear down the current parent process and start a new one with the full 3rd party packages imported.
+- If so, we will tear down the current parent process and start a new one with the full 3rd party packages imported. Then we'll fork the environment as normal.
 
 ## Local Experiments
 
-To test how hotreload works with a real project, we bundle a `mypackage` and `external-package` library in this repo.
+To test how firehot works with a real project, we bundle a `mypackage` and `external-package` library in this repo.
 
 ```bash
 make
