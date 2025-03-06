@@ -31,7 +31,11 @@ def dummy_func():
 
     # Dynamically import the temporary module.
     spec = importlib.util.spec_from_file_location("dummy_module", str(module_file))
+    assert spec is not None
+
     dummy_module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+
     spec.loader.exec_module(dummy_module)
     return dummy_module
 

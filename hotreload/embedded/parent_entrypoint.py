@@ -33,6 +33,7 @@ class MessageType(StrEnum):
     EXIT_REQUEST = "EXIT_REQUEST"
 
 
+@dataclass
 class MessageBase:
     name: MessageType
 
@@ -119,7 +120,8 @@ MESSAGES = {
 
 
 def write_message(message: MessageBase):
-    print(json_dumps(asdict(message)), flush=True)
+    sys.stdout.write(f"{json_dumps(asdict(message))}\n")
+    sys.stdout.flush()
 
 
 def read_message() -> MessageBase | None:

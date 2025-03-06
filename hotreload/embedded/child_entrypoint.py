@@ -10,6 +10,11 @@ import importlib
 import importlib.util
 import pickle
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    module_path = "path"
+    pickled_str = "pickled_str"
 
 # These will imported dynamically by rust
 module_path: str

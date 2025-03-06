@@ -38,7 +38,7 @@ def dummy_func():
     # Import the module normally to register it in sys.modules
     if "dummy_module" in sys.modules:
         del sys.modules["dummy_module"]
-    import dummy_module  # Now dummy_module is picklable
+    import dummy_module  # type: ignore - Now dummy_module is picklable
 
     # Prepare pickled string: pack (dummy_func, None)
     data_tuple = (dummy_module.dummy_func, None)
@@ -82,7 +82,7 @@ def dummy_func(a, b):
     # Import the script normally so that its function is picklable.
     if "dummy_script" in sys.modules:
         del sys.modules["dummy_script"]
-    import dummy_script
+    import dummy_script  # type: ignore
 
     dummy_func = dummy_script.dummy_func
 

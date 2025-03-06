@@ -6,7 +6,7 @@ to avoid reloading the entire application during development.
 """
 
 from contextlib import contextmanager
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, TypeVar
 from uuid import UUID
 
 from hotreload.hotreload import (
@@ -79,7 +79,7 @@ class ImportRunner:
         """
         Communicate with an isolated process to get its output
         """
-        return communicate_isolated_rs(self.runner_id, UUID(process_uuid))
+        return communicate_isolated_rs(self.runner_id, str(process_uuid))
 
     def update_environment(self):
         """

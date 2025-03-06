@@ -10,7 +10,14 @@ without sub-functions.
 import base64
 import inspect
 import pickle
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+
+    def func(val: int):
+        pass
+
+    args = (0,)
 
 # This will be passed in from rust
 func: Callable

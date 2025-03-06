@@ -4,35 +4,27 @@
 all: lint
 
 # Package directories
-ROOT_DIR := ./
-MYPACKAGE_DIR := ./mypackage/
+ROOT_DIR := ./hotreload/
+MYPACKAGE_DIR := ./mypackage/mypackage/
 EXTERNAL_DIR := ./mypackage/external-package/
 PKG_DIRS := $(ROOT_DIR) $(MYPACKAGE_DIR) $(EXTERNAL_DIR)
 
-# Define a function to run a lint tool on a specific directory
-# Usage: $(call run_lint_tool,<directory>,<tool_name>,<tool_command>)
-define run_lint_tool
-	@echo "\n=== Linting $(1) with $(2) ==="; \
-	if [ -f "$(1)/pyproject.toml" ]; then \
-		(cd $(1) && uv run $(3)) || { echo "FAILED: $(2) in $(1)"; exit 1; }; \
-	else \
-		echo "SKIPPED: No pyproject.toml found in $(1)"; \
-	fi; \
-	echo "=== $(2) completed successfully for $(1) ===";
+# Define a function to run pyright on a specific directory
+# Usage: $(call run_pyright,<directory>)
+define run_pyright
+	@echo "\n=== Running pyright on $(1) ==="; \
+	(cd $(1) && uv run pyright) || { echo "FAILED: pyright in $(1)"; exit 1; }; \
+	echo "=== pyright completed successfully for $(1) ===";
 endef
 
 # Define a function to run ruff on a specific directory 
 # Usage: $(call run_ruff,<directory>)
 define run_ruff
 	@echo "\n=== Running ruff on $(1) ==="; \
-	if [ -f "$(1)/pyproject.toml" ]; then \
-		echo "Running ruff format in $(1)"; \
-		(cd $(1) && uv run ruff format .) || { echo "FAILED: ruff format in $(1)"; exit 1; }; \
-		echo "Running ruff check --fix in $(1)"; \
-		(cd $(1) && uv run ruff check --fix .) || { echo "FAILED: ruff check in $(1)"; exit 1; }; \
-	else \
-		echo "SKIPPED: No pyproject.toml found in $(1)"; \
-	fi; \
+	echo "Running ruff format in $(1)"; \
+	(cd $(1) && uv run ruff format .) || { echo "FAILED: ruff format in $(1)"; exit 1; }; \
+	echo "Running ruff check --fix in $(1)"; \
+	(cd $(1) && uv run ruff check --fix .) || { echo "FAILED: ruff check in $(1)"; exit 1; }; \
 	echo "=== ruff completed successfully for $(1) ===";
 endef
 
@@ -41,7 +33,7 @@ endef
 define lint_directory
 	@echo "\n=== Running all linters on $(1) ===";
 	$(call run_ruff,$(1))
-	$(call run_lint_tool,$(1),pyright,pyright)
+	$(call run_pyright,$(1))
 	@echo "=== All linters completed successfully for $(1) ===";
 endef
 
@@ -72,7 +64,7 @@ lint-ruff:
 lint-pyright:
 	@echo "=== Running pyright on all packages ==="
 	@for dir in $(PKG_DIRS); do \
-		$(call run_lint_tool,$$dir,pyright,pyright); \
+		$(call run_pyright,$$dir); \
 	done
 	@echo "\n=== Pyright type checking completed successfully for all packages ==="
 
