@@ -415,7 +415,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
-        // Create a simple Python project with imports
+        // Create a simple Python project with initial imports
         create_temp_py_file(&temp_dir, "main.py", "import os\nimport sys");
 
         let runner_result = create_mock_import_runner(dir_path);
@@ -423,13 +423,40 @@ mod tests {
 
         let mut runner = runner_result.unwrap();
 
-        // Test updating environment
-        let update_result = runner.update_environment();
+        // Get the PID of the initial Python process
+        let initial_pid = runner.child.lock().unwrap().id();
+        println!("Initial process PID: {:?}", initial_pid);
 
-        // For now, just check that the function executes without error
-        // In a real test, we would want to check that the correct imports were found
-        // But this requires a fully functioning Python process
-        assert!(update_result.is_ok() || update_result.err().unwrap().contains("No line found"));
+        // First, verify that running update with no changes keeps the same PID
+        let no_change_result = runner.update_environment();
+        assert!(no_change_result.is_ok(), "Failed to update environment: {:?}", no_change_result.err());
+        
+        // The environment should NOT have been updated (return false)
+        assert_eq!(no_change_result.unwrap(), false, "Environment should not have been updated when imports didn't change");
+
+        // Get the PID after update with no changes
+        let unchanged_pid = runner.child.lock().unwrap().id();
+        println!("PID after no changes: {:?}", unchanged_pid);
+        
+        // Verify that the process was NOT restarted (PIDs should be the same)
+        assert_eq!(initial_pid, unchanged_pid, "Process should NOT have been restarted when imports didn't change");
+
+        // Now update the file with different imports to trigger a restart
+        create_temp_py_file(&temp_dir, "main.py", "import os\nimport sys\nimport json");
+        
+        // Test updating environment with changed imports
+        let update_result = runner.update_environment();
+        assert!(update_result.is_ok(), "Failed to update environment: {:?}", update_result.err());
+        
+        // The environment should have been updated (return true)
+        assert!(update_result.unwrap(), "Environment should have been updated due to import changes");
+
+        // Get the PID of the new Python process
+        let new_pid = runner.child.lock().unwrap().id();
+        println!("New process PID after import changes: {:?}", new_pid);
+
+        // Verify that the process was restarted (PIDs should be different)
+        assert_ne!(initial_pid, new_pid, "Process should have been restarted with a different PID when imports changed");
     }
 
     #[test]
