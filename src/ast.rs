@@ -18,8 +18,6 @@ use rustpython_parser::{parse, Mode};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::sync::{Arc, Mutex};
-use uuid::Uuid;
 use sha2::{Sha256, Digest};
 
 /// A simple structure to hold information about an import.

@@ -97,7 +97,7 @@ fn start_import_runner(_py: Python, package_path: &str) -> PyResult<String> {
     let third_party_modules = ast_manager.process_all_py_files()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to process Python files: {}", e)))?;
 
-    let package_name = ast_manager.get_package_name()
+    let _package_name = ast_manager.get_package_name()
         .ok_or_else(|| PyRuntimeError::new_err("Could not determine package name"))?;
     
     // Spawn Python subprocess to load modules
