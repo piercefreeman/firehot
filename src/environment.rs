@@ -2,7 +2,7 @@ use anstream::eprintln;
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, trace, warn};
 use owo_colors::OwoColorize;
-use serde_json::{self, json};
+use serde_json::{self};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -17,8 +17,7 @@ use crate::ast::ProjectAstManager;
 use crate::messages::{ExitRequest, ForkRequest, Message};
 use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
 
-use std::fs;
-use tempfile::TempDir;
+
 
 /// Runtime environment for executing Python code
 pub struct Environment {
@@ -481,130 +480,6 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
     Ok(child)
 }
 
-/// Higher-level function that prepares a Python script for execution in isolation.
-/// Used in our testing harness.
-///
-/// This function:
-/// 1. Takes a Python script as input
-/// 2. Creates a temporary environment
-/// 3. Builds a JSON payload with all necessary information
-/// 4. Handles pickling and encoding for execution isolation
-///
-/// Returns a tuple containing:
-/// - The pickled, base64-encoded data ready for execution in isolation
-/// - The temporary directory that contains the script (caller is responsible for keeping this in scope
-///     otherwise it will be garbage collected and python can't find the script)
-pub fn prepare_script_for_isolation(
-    python_script: &str,
-    func_name: &str,
-) -> Result<(String, TempDir), String> {
-    // Create a temporary directory for the script
-    let temp_dir =
-        TempDir::new().map_err(|e| format!("Failed to create temporary directory: {}", e))?;
-
-    // Get the temporary directory path
-    let temp_dir_path = temp_dir
-        .path()
-        .to_str()
-        .ok_or_else(|| "Failed to convert temp dir path to string".to_string())?;
-
-    // Create a valid Python module name (no dashes, start with letter)
-    let module_name = format!("pymodule{}", Uuid::new_v4().to_string().replace("-", ""));
-    
-    // Create the module directory inside the temp directory
-    let module_dir = temp_dir.path().join(&module_name);
-    fs::create_dir(&module_dir)
-        .map_err(|e| format!("Failed to create module directory: {}", e))?;
-    
-    // Create __init__.py inside the module directory to make it a proper package
-    let init_path = module_dir.join("__init__.py");
-    fs::write(&init_path, "# Package initialization")
-        .map_err(|e| format!("Failed to write __init__.py file: {}", e))?;
-
-    // Create the script file inside the module directory (using a standard name)
-    let script_file_name = "script.py";
-    let script_path = module_dir.join(script_file_name);
-    fs::write(&script_path, python_script)
-        .map_err(|e| format!("Failed to write script to file: {}", e))?;
-
-    // At this point our directory looks like:
-    // pymodule
-    // - __init__.py
-    // - script.py
-
-    // Build the payload according to the SerializedCall TypedDict format
-    // The module import path is module_name.script (without the .py extension)
-    let isolation_payload = json!({
-        "func_module_path": format!("{}.{}", module_name, script_file_name.trim_end_matches(".py")),
-        "func_name": func_name,
-        "func_qualname": func_name,
-        "args": serde_json::Value::Null,
-    });
-
-    // Create a simple pickle script that only handles pickling and base64 encoding
-    let pickle_script = r#"
-import sys
-import json
-import base64
-import pickle
-
-# Get the payload from command line arguments
-payload_json = sys.argv[1]
-payload = json.loads(payload_json)
-
-# Pickle and base64 encode
-pickled_data = base64.b64encode(pickle.dumps(payload)).decode('utf-8')
-
-# Print the result to stdout (this is what the function returns)
-print(pickled_data)
-    "#;
-
-    // Write the pickle script directly to the temp directory (not in the module)
-    let pickle_script_path = temp_dir.path().join("pickle_helper.py");
-    fs::write(&pickle_script_path, pickle_script)
-        .map_err(|e| format!("Failed to write pickle script to temporary file: {}", e))?;
-
-    // Serialize the payload to a JSON string
-    let json_payload = isolation_payload.to_string();
-
-    // Modify the current env path to add the tmpdir to PYTHONPATH
-    // Return this as a releasable object when it goes out of scope, so we clear it from the path
-
-    // Run the pickle script with the payload as an argument
-    let child = Command::new("python")
-        .arg(&pickle_script_path)
-        .arg(&json_payload)
-        .env("PYTHONPATH", temp_dir_path) // Add temp dir to Python's path
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn Python process: {}", e))?;
-
-    // Get the output
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to get Python process output: {}", e))?;
-
-    // Log stderr for debugging
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.is_empty() {
-        debug!("Python stderr: {}", stderr);
-    }
-
-    // Check if the process executed successfully
-    if !output.status.success() {
-        return Err(format!("Python pickling failed: {}", stderr));
-    }
-
-    // Parse the output (base64 encoded pickled data)
-    let pickled_output = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    // Return both the pickled output and the temporary directory
-    // The caller is now responsible for keeping the temp_dir in scope as needed
-    info!("Successfully prepared script for isolation");
-    Ok((pickled_output, temp_dir))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,6 +487,7 @@ mod tests {
     use base64::Engine;
     use tempfile::TempDir;
 
+    use crate::harness::prepare_script_for_isolation;
     use crate::messages::ChildComplete;
     use crate::scripts::PYTHON_LOADER_SCRIPT;
     use std::fs::File;
@@ -1009,15 +885,8 @@ def main():
     return result
         "#;
 
-        // Create a temporary directory for the project
-        let temp_dir = TempDir::new().unwrap();
-        let dir_path = temp_dir.path().to_str().unwrap();
-
-        // Create a mock ImportRunner - not used in this test but demonstrates the flow
-        let _runner = create_mock_import_runner(dir_path)?;
-
         // Prepare the script for isolation
-        let (pickled_data, script_temp_dir) = prepare_script_for_isolation(python_script, "main")?;
+        let (pickled_data, _python_env) = prepare_script_for_isolation(python_script, "main")?;
 
         // Verify that we got some pickled data back
         assert!(!pickled_data.is_empty());
@@ -1027,9 +896,6 @@ def main():
         let _decoded = base64::engine::general_purpose::STANDARD
             .decode(pickled_data)
             .map_err(|e| format!("Invalid base64: {}", e))?;
-
-        // Keep script_temp_dir in scope until the end of the test
-        std::mem::drop(script_temp_dir);
 
         Ok(())
     }
@@ -1046,43 +912,36 @@ def main():
     return result
         "#;
 
-        // Create a temporary directory for the project
-        let temp_dir = TempDir::new().unwrap();
-        let dir_path = temp_dir.path().to_str().unwrap();
+        // Prepare the script for isolation
+        // Keep the temp_dir in scope until the end of the test
+        let (pickled_data, python_env) = prepare_script_for_isolation(python_script, "main")?;
 
         // Create a mock ImportRunner
-        let mut runner = create_mock_import_runner(dir_path)?;
-        
+        let mut runner = create_mock_import_runner(&python_env.container_path)?;
+
         // Boot the environment
         runner.boot_main()?;
 
-        // Prepare the script for isolation
-        // Keep the temp_dir in scope until the end of the test
-        let (pickled_data, script_temp_dir) = prepare_script_for_isolation(python_script, "main")?;
-
         // Execute the script in isolation
         let process_uuid = runner.exec_isolated(&pickled_data)?;
-        
+
         // Verify the result - should be a valid UUID string
         assert!(!process_uuid.is_empty());
-        
+
         // Wait for a moment to let the isolated process execute
         std::thread::sleep(std::time::Duration::from_millis(100));
-        
+
         // Communicate with the isolated process to get the result
         let process_result = runner.communicate_isolated(&process_uuid)?;
-        
+
         // The result should be "Hello, World!"
         assert_eq!(process_result, Some("Hello, World!".to_string()));
-        
+
         // Stop the isolated process
         runner.stop_isolated(&process_uuid)?;
-        
+
         // Stop the main environment
         runner.stop_main()?;
-
-        // Keep script_temp_dir in scope until the end of the test
-        std::mem::drop(script_temp_dir);
 
         Ok(())
     }
