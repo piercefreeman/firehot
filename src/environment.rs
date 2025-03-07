@@ -2,7 +2,7 @@ use anstream::eprintln;
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, trace, warn};
 use owo_colors::OwoColorize;
-use serde_json;
+use serde_json::{self, json};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -16,6 +16,9 @@ use uuid::Uuid;
 use crate::ast::ProjectAstManager;
 use crate::messages::{ExitRequest, ForkRequest, Message};
 use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
+
+use std::fs;
+use tempfile::TempDir;
 
 /// Runtime environment for executing Python code
 pub struct Environment {
@@ -478,9 +481,111 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
     Ok(child)
 }
 
+/// Higher-level function that prepares a Python script for execution in isolation.
+/// Used in our testing harness.
+///
+/// This function:
+/// 1. Takes a Python script as input
+/// 2. Creates a temporary environment
+/// 3. Builds a JSON payload with all necessary information
+/// 4. Handles pickling and encoding for execution isolation
+///
+/// Returns the pickled, base64-encoded data ready for execution in isolation.
+pub fn prepare_script_for_isolation<T: serde::Serialize>(
+    python_script: &str,
+    payload: T,
+) -> Result<String, String> {
+    // Create a temporary directory for the script
+    let temp_dir =
+        TempDir::new().map_err(|e| format!("Failed to create temporary directory: {}", e))?;
+
+    // Get the temporary directory path
+    let temp_dir_path = temp_dir
+        .path()
+        .to_str()
+        .ok_or_else(|| "Failed to convert temp dir path to string".to_string())?;
+
+    // Create a unique script name
+    let script_name = format!("script_{}.py", Uuid::new_v4());
+    let script_path = temp_dir.path().join(&script_name);
+
+    // Write the Python script to the file
+    fs::write(&script_path, python_script)
+        .map_err(|e| format!("Failed to write script to temporary file: {}", e))?;
+
+    // Build the payload with additional metadata
+    let isolation_payload = json!({
+        "script_path": script_path.to_str().unwrap(),
+        "temp_dir": temp_dir_path,
+        "script_name": script_name,
+        "user_payload": payload,
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    });
+
+    // Create a simple pickle script that only handles pickling and base64 encoding
+    let pickle_script = r#"
+import pickle
+import base64
+import json
+import sys
+
+# Get the payload from command line arguments
+payload_json = sys.argv[1]
+payload = json.loads(payload_json)
+
+# Pickle and base64 encode
+pickled_data = base64.b64encode(pickle.dumps(payload)).decode('utf-8')
+
+# Print the result
+print(pickled_data)
+    "#;
+
+    // Write the pickle script to a temporary file
+    let pickle_script_path = temp_dir.path().join("pickle_helper.py");
+    fs::write(&pickle_script_path, pickle_script)
+        .map_err(|e| format!("Failed to write pickle script to temporary file: {}", e))?;
+
+    // Serialize the payload to a JSON string
+    let json_payload = isolation_payload.to_string();
+
+    // Run the pickle script with the payload as an argument
+    let child = Command::new("python")
+        .arg(&pickle_script_path)
+        .arg(&json_payload)
+        .env("PYTHONPATH", temp_dir_path) // Add temp dir to Python's path
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn Python process: {}", e))?;
+
+    // Get the output
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to get Python process output: {}", e))?;
+
+    // Check if the process executed successfully
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Python pickling failed: {}", stderr));
+    }
+
+    // Parse the output (base64 encoded pickled data)
+    let pickled_output = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Note: The temporary directory will be automatically cleaned up when it goes out of scope
+
+    info!("Successfully prepared script for isolation");
+    Ok(pickled_output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64;
+    use tempfile::TempDir;
 
     use crate::messages::ChildComplete;
     use crate::scripts::PYTHON_LOADER_SCRIPT;
@@ -488,8 +593,6 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
-
-    use tempfile::TempDir;
 
     // Helper function to create a temporary Python file
     fn create_temp_py_file(dir: &TempDir, filename: &str, content: &str) -> PathBuf {
@@ -866,5 +969,53 @@ mod tests {
             result.unwrap(),
             "stop_main should return true after successful execution"
         );
+    }
+
+    #[test]
+    fn test_prepare_script_for_isolation() -> Result<(), String> {
+        use serde::Serialize;
+
+        // Create a sample Python script
+        let python_script = r#"
+def greet(name):
+    return f"Hello, {name}!"
+
+def main():
+    result = greet("World")
+    print(result)
+    return result
+        "#;
+
+        // Create a sample payload
+        #[derive(Serialize)]
+        struct TestPayload {
+            function_name: String,
+            args: Vec<String>,
+        }
+
+        let payload = TestPayload {
+            function_name: "main".to_string(),
+            args: vec![],
+        };
+
+        // Create a temporary directory for the project
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path().to_str().unwrap();
+
+        // Create a mock ImportRunner
+        let runner = create_mock_import_runner(dir_path)?;
+
+        // Prepare the script for isolation
+        let pickled_data = prepare_script_for_isolation(python_script, payload)?;
+
+        // Verify that we got some pickled data back
+        assert!(!pickled_data.is_empty());
+        assert!(pickled_data.len() > 20); // A reasonable base64 string length
+
+        // Verify the pickled data is valid base64
+        let _decoded =
+            base64::decode(pickled_data).map_err(|e| format!("Invalid base64: {}", e))?;
+
+        Ok(())
     }
 }
