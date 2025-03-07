@@ -6,6 +6,7 @@ Intended for embeddable usage in Rust, can only import stdlib modules.
 
 """
 
+import logging
 import os
 import sys
 from dataclasses import asdict, dataclass
@@ -13,6 +14,7 @@ from enum import StrEnum
 from json import dumps as json_dumps
 from json import loads as json_loads
 from json.decoder import JSONDecodeError
+from os import getenv
 from time import sleep
 from traceback import format_exc
 
@@ -155,6 +157,8 @@ def read_message() -> MessageBase | None:
 def main():
     # This will be populated with dynamic import statements from Rust
     dynamic_imports = sys.argv[1] if len(sys.argv) > 1 else ""
+    log_level = getenv("FIREHOT_LOG_LEVEL", "WARNING")
+    logging.basicConfig(level=log_level)
 
     # Execute the dynamic imports
     try:
@@ -177,12 +181,14 @@ def main():
                 exec_globals = globals().copy()
                 exec_locals = {}
 
-                print("Will execute code in forked process...", flush=True)
+                logging.info("Will execute code in forked process...")
+                sys.stdout.flush()
 
                 # Execute the code
                 exec(code_to_execute, exec_globals, exec_locals)
 
-                print("Executed code in forked process", flush=True)
+                logging.info("Executed code in forked process")
+                sys.stdout.flush()
 
                 # By convention, the result is stored in the 'result' variable
                 if "result" in exec_locals:
@@ -210,7 +216,8 @@ def main():
                 fork_pid = handle_fork_request(command.code)
                 write_message(ForkResponse(child_pid=fork_pid))
             elif isinstance(command, ExitRequest):
-                print("Exiting loader process", flush=True)
+                logging.info("Exiting loader process")
+                sys.stdout.flush()
                 break
             else:
                 write_message(UnknownCommandError(command=str(command)))

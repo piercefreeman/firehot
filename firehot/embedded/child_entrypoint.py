@@ -8,8 +8,10 @@ Intended for embeddable usage in Rust, can only import stdlib modules.
 import base64
 import importlib
 import importlib.util
+import logging
 import pickle
 import sys
+from os import getenv
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -22,6 +24,9 @@ if TYPE_CHECKING:
 module_path: str
 pickled_str: str
 
+log_level = getenv("FIREHOT_LOG_LEVEL", "WARNING")
+logging.basicConfig(level=log_level)
+
 # Decode base64 and unpickle
 pickled_bytes = base64.b64decode(pickled_str)
 data: "SerializedCall" = pickle.loads(pickled_bytes)
@@ -31,7 +36,8 @@ data: "SerializedCall" = pickle.loads(pickled_bytes)
 # this lets us more explicitly handle errors and issue debugging logs.
 module_path = data["func_module_path"]
 if module_path:
-    print(f"Importing module: {module_path}")
+    logging.info(f"Importing module: {module_path}")
+    sys.stdout.flush()
     # Try to import the module or reload it if already imported
     if module_path in sys.modules:
         importlib.reload(sys.modules[module_path])
