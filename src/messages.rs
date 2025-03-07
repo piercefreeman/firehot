@@ -100,6 +100,7 @@ impl ChildComplete {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildError {
     pub error: String,
+    pub traceback: Option<String>,
 }
 
 impl MessageBase for ChildError {
@@ -109,8 +110,8 @@ impl MessageBase for ChildError {
 }
 
 impl ChildError {
-    pub fn new(error: String) -> Self {
-        Self { error }
+    pub fn new(error: String, traceback: Option<String>) -> Self {
+        Self { error, traceback }
     }
 }
 
@@ -348,7 +349,7 @@ mod tests {
         );
 
         // Test ChildError
-        let json = r#"{"name": "CHILD_ERROR", "error": "Something went wrong"}"#;
+        let json = r#"{"name": "CHILD_ERROR", "error": "Something went wrong", "traceback": "Traceback (most recent call last):\n  File \"<stdin>\", line 1, in <module>\nSomething went wrong"}"#;
         let parsed: Result<Message, _> = serde_json::from_str(json);
         assert!(
             parsed.is_ok(),
