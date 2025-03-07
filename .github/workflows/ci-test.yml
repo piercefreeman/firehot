@@ -1,4 +1,4 @@
-name: CI Lint
+name: CI Test
 
 on:
   push:

@@ -32,15 +32,15 @@ jobs:
             echo "should_run=false" >> $GITHUB_OUTPUT
           fi
 
-  # Run cargo tests on each target OS
+  # Run cargo tests on each target OS. We perform this logic regardless of whether
+  # we are building wheels, because it's valuable as a CI check for each commit.
   cargo_test:
-    needs: check_run_condition
-    if: ${{ needs.check_run_condition.outputs.should_run == 'true' }}
-    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+    
+    runs-on: ${{ matrix.os }}
     
     steps:
       - uses: actions/checkout@v3
