@@ -15,6 +15,7 @@ pub mod environment;
 pub mod harness;
 pub mod messages;
 pub mod scripts;
+pub mod multiplex_logs;
 
 // Export types from messages and scripts for public use
 pub use messages::{ExitRequest, ForkRequest, Message};

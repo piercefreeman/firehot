@@ -3,19 +3,33 @@ use anyhow::{anyhow, Result};
 use log::{debug, error, info, trace, warn};
 use owo_colors::OwoColorize;
 use serde_json::{self};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use libc;
 use std::io::BufRead;
-use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::ast::ProjectAstManager;
 use crate::messages::{ExitRequest, ForkRequest, Message};
 use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
+use crate::multiplex_logs::{parse_multiplexed_line, MultiplexedLogLine};
+
+/// Result from a forked process
+#[derive(Debug, Clone)]
+pub enum ProcessResult {
+    /// Process completed successfully with an optional return value
+    Complete(Option<String>),
+    /// Process failed with an error message
+    Error(String),
+    /// Raw log output from the process
+    Log(MultiplexedLogLine),
+}
 
 /// Runtime environment for executing Python code
 pub struct Environment {
@@ -23,6 +37,11 @@ pub struct Environment {
     pub stdin: std::process::ChildStdin, // The stdin of the forkable process
     pub reader: std::io::Lines<BufReader<std::process::ChildStdout>>, // The reader of the forkable process
     pub forked_processes: HashMap<String, i32>,                       // Map of UUID to PID
+    
+    // New fields for thread-based monitoring
+    pub result_map: HashMap<String, VecDeque<ProcessResult>>, // Map of UUID to results queue
+    pub monitor_thread: Option<JoinHandle<()>>,              // Thread handle for monitoring output
+    pub thread_terminate_tx: Option<Sender<()>>,             // Channel to signal thread termination
 }
 
 /// Runner for isolated Python code execution
@@ -32,44 +51,6 @@ pub struct ImportRunner {
     pub ast_manager: ProjectAstManager, // Project AST manager for this environment
 
     first_scan: bool,
-}
-
-/// Represents the parsed components of a multiplexed log line
-#[derive(Debug, Clone, PartialEq)]
-pub struct MultiplexedLogLine {
-    /// Process ID that generated the log
-    pub pid: u32,
-    /// Stream name (stdout or stderr)
-    pub stream_name: String,
-    /// The actual log content (without the prefix)
-    pub content: String,
-}
-
-/// Error types that can occur during parsing of multiplexed log lines
-#[derive(Debug)]
-pub enum MultiplexedLogLineError {
-    InvalidFormat(String),
-    PidParseError(std::num::ParseIntError),
-    MissingComponent(String),
-}
-
-impl std::fmt::Display for MultiplexedLogLineError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidFormat(msg) => write!(f, "Invalid log format: {}", msg),
-            Self::PidParseError(err) => write!(f, "Failed to parse PID: {}", err),
-            Self::MissingComponent(msg) => write!(f, "Missing component: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for MultiplexedLogLineError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::PidParseError(err) => Some(err),
-            _ => None,
-        }
-    }
 }
 
 impl ImportRunner {
@@ -188,13 +169,26 @@ impl ImportRunner {
             format!("with ID: {}", self.id).white().bold()
         );
 
-        // Create and store the environment
-        let environment = Environment {
+        // Create the environment
+        let mut environment = Environment {
             child,
             stdin,
             reader: lines_iter,
             forked_processes: HashMap::new(),
+            result_map: HashMap::new(),
+            monitor_thread: None,
+            thread_terminate_tx: None,
         };
+        
+        // Extract the reader for the monitor thread
+        let stdout = environment.child.stdout.take();
+        if let Some(stdout) = stdout {
+            let reader = BufReader::new(stdout).lines();
+            // Start the monitor thread
+            environment.start_monitor_thread(reader);
+        } else {
+            warn!("Failed to capture stdout for monitor thread");
+        }
 
         self.environment = Some(Arc::new(Mutex::new(environment)));
 
@@ -216,6 +210,9 @@ impl ImportRunner {
         let mut env_guard = environment
             .lock()
             .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+            
+        // Stop the monitor thread first
+        env_guard.stop_monitor_thread();
 
         // Kill the main child process
         if let Err(e) = env_guard.child.kill() {
@@ -229,6 +226,7 @@ impl ImportRunner {
 
         // Clear the process map
         env_guard.forked_processes.clear();
+        env_guard.result_map.clear();
 
         info!("Main runner process stopped");
         Ok(true)
@@ -459,98 +457,174 @@ pickled_str = "{}"
             return Err(format!("Process {} does not exist", process_uuid));
         }
 
-        // Read from the process output
-        for line in &mut env_guard.reader {
-            let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
-
-            // Try to parse as a Message
-            match serde_json::from_str::<Message>(&line) {
-                Ok(message) => match message {
-                    Message::ChildComplete(complete) => {
-                        trace!("Received function result: {:?}", complete);
-                        return Ok(complete.result);
+        // Check if we have results for this process
+        if let Some(queue) = env_guard.result_map.get_mut(process_uuid) {
+            // Process any results in the queue
+            while let Some(result) = queue.pop_front() {
+                match result {
+                    ProcessResult::Complete(result) => {
+                        trace!("Found completion result for process {}", process_uuid);
+                        return Ok(result);
+                    },
+                    ProcessResult::Error(error) => {
+                        error!("Found error result for process {}: {}", process_uuid, error);
+                        return Err(error);
+                    },
+                    ProcessResult::Log(log_line) => {
+                        // Print log lines to stdout with appropriate formatting
+                        println!("[{}:{}] {}", 
+                            process_uuid, log_line.stream_name, log_line.content);
                     }
-                    Message::ChildError(error) => {
-                        error!("Received function error: {:?}", error);
-                        // Format the error with traceback information if available
-                        let error_message = match error.traceback {
-                            Some(traceback) => format!("{}\n\n{}", error.error, traceback),
-                            None => error.error,
-                        };
-                        return Err(error_message);
-                    }
-                    _ => {
-                        trace!("Received other message type: {:?}", message);
-                    }
-                },
-                Err(_) => {
-                    // If parsing fails, print the raw line with an "[isolate]" prefix.
-                    println!("[isolate] {}", line);
-                    continue;
                 }
             }
+        } else {
+            // Create an empty queue for this process if it doesn't exist yet
+            env_guard.result_map.insert(process_uuid.to_string(), VecDeque::new());
         }
 
-        // If we get here, there was no output to read
+        // If we got here, there are no results ready yet
+        trace!("No results available yet for process {}", process_uuid);
         Ok(None)
     }
 }
 
-/// Robustly parses a line using our multiplex logging convention
-/// Format: [PID:{pid}:{stream_name}] {content}
-///
-/// # Returns
-/// - `Ok(MultiplexedLogLine)` if the line matches the expected format
-/// - `Err(MultiplexedLogLineError)` if parsing fails
-pub fn parse_multiplexed_line(line: &str) -> Result<MultiplexedLogLine, MultiplexedLogLineError> {
-    // Check for the opening pattern
-    if !line.starts_with("[PID:") {
-        return Err(MultiplexedLogLineError::InvalidFormat(
-            "Line does not start with [PID:".to_string(),
-        ));
+impl Environment {
+    /// Start a monitoring thread that continuously reads from the child process stdout
+    /// and populates the result_map with parsed output
+    pub fn start_monitor_thread(&mut self, reader: std::io::Lines<BufReader<std::process::ChildStdout>>) {
+        // Create a channel for signaling thread termination
+        let (terminate_tx, terminate_rx) = mpsc::channel();
+        self.thread_terminate_tx = Some(terminate_tx);
+        
+        // Clone the result map into an Arc<Mutex<>> for sharing with the thread
+        let result_map = Arc::new(Mutex::new(self.result_map.clone()));
+        
+        // Clone the forked processes map for the thread to access
+        let forked_processes = Arc::new(Mutex::new(self.forked_processes.clone()));
+        
+        // Start the monitor thread
+        let thread_handle = thread::spawn(move || {
+            debug!("Monitor thread started");
+            let mut reader = reader;
+            
+            loop {
+                // Check if we've been asked to terminate
+                if terminate_rx.try_recv().is_ok() {
+                    debug!("Monitor thread received terminate signal");
+                    break;
+                }
+                
+                // Try to read a line from the child process
+                match reader.next() {
+                    Some(Ok(line)) => {
+                        // First, try to parse it as a Message
+                        if let Ok(message) = serde_json::from_str::<Message>(&line) {
+                            match message {
+                                Message::ChildComplete(complete) => {
+                                    trace!("Monitor thread received function result: {:?}", complete);
+                                    
+                                    // Add the result to all process result queues
+                                    // In a real implementation, we would need to identify which process this belongs to
+                                    let mut result_map = result_map.lock().unwrap();
+                                    for (_, queue) in result_map.iter_mut() {
+                                        queue.push_back(ProcessResult::Complete(complete.result.clone()));
+                                    }
+                                },
+                                Message::ChildError(error) => {
+                                    error!("Monitor thread received function error: {:?}", error);
+                                    
+                                    // Format the error with traceback information if available
+                                    let error_message = match error.traceback {
+                                        Some(traceback) => format!("{}\n\n{}", error.error, traceback),
+                                        None => error.error,
+                                    };
+                                    
+                                    // Add the error to all process result queues
+                                    let mut result_map = result_map.lock().unwrap();
+                                    for (_, queue) in result_map.iter_mut() {
+                                        queue.push_back(ProcessResult::Error(error_message.clone()));
+                                    }
+                                },
+                                _ => {
+                                    trace!("Monitor thread received other message type: {:?}", message);
+                                }
+                            }
+                        } else {
+                            // Try to parse it as a multiplexed log line
+                            match parse_multiplexed_line(&line) {
+                                Ok(log_line) => {
+                                    // Find which process this log belongs to based on PID
+                                    let forked_processes = forked_processes.lock().unwrap();
+                                    let mut process_uuid = None;
+                                    
+                                    for (uuid, pid) in forked_processes.iter() {
+                                        if *pid == log_line.pid as i32 {
+                                            process_uuid = Some(uuid.clone());
+                                            break;
+                                        }
+                                    }
+                                    
+                                    // If we found a matching process, add the log to its queue
+                                    if let Some(uuid) = process_uuid {
+                                        let mut result_map = result_map.lock().unwrap();
+                                        if let Some(queue) = result_map.get_mut(&uuid) {
+                                            queue.push_back(ProcessResult::Log(log_line.clone()));
+                                        } else {
+                                            // Create a new queue for this process
+                                            let mut queue = VecDeque::new();
+                                            queue.push_back(ProcessResult::Log(log_line.clone()));
+                                            result_map.insert(uuid, queue);
+                                        }
+                                    } else {
+                                        // If we can't match it to a specific process, log it
+                                        println!("Unmatched log: [{}:{}] {}", 
+                                            log_line.pid, log_line.stream_name, log_line.content);
+                                    }
+                                },
+                                Err(_) => {
+                                    // If parsing fails, print the raw line
+                                    println!("Raw output: {}", line);
+                                }
+                            }
+                        }
+                    },
+                    Some(Err(e)) => {
+                        error!("Error reading from child process: {}", e);
+                        break;
+                    },
+                    None => {
+                        // End of stream
+                        debug!("End of child process output stream");
+                        break;
+                    }
+                }
+                
+                // Short sleep to avoid tight loop
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            
+            debug!("Monitor thread terminated");
+        });
+        
+        self.monitor_thread = Some(thread_handle);
     }
     
-    // Find the closing bracket that ends the prefix
-    let closing_bracket_pos = match line.find("] ") {
-        Some(pos) => pos,
-        None => return Err(MultiplexedLogLineError::InvalidFormat(
-            "Missing closing bracket after prefix".to_string(),
-        )),
-    };
-    
-    // Extract the prefix content (without the brackets)
-    let prefix = &line[5..closing_bracket_pos];
-    
-    // Split the prefix by colon to get pid and stream_name
-    let parts: Vec<&str> = prefix.split(':').collect();
-    
-    if parts.len() != 2 {
-        return Err(MultiplexedLogLineError::InvalidFormat(
-            format!("Expected format [PID:pid:stream_name], got [PID:{}]", prefix),
-        ));
+    /// Stop the monitoring thread if it's running
+    pub fn stop_monitor_thread(&mut self) {
+        if let Some(terminate_tx) = self.thread_terminate_tx.take() {
+            debug!("Sending terminate signal to monitor thread");
+            if let Err(e) = terminate_tx.send(()) {
+                warn!("Failed to send terminate signal to monitor thread: {}", e);
+            }
+        }
+        
+        if let Some(handle) = self.monitor_thread.take() {
+            debug!("Waiting for monitor thread to terminate");
+            if let Err(e) = handle.join() {
+                error!("Failed to join monitor thread: {:?}", e);
+            }
+        }
     }
-    
-    // Parse the PID
-    let pid = parts[0].parse::<u32>()
-        .map_err(MultiplexedLogLineError::PidParseError)?;
-    
-    // Get the stream name
-    let stream_name = parts[1].to_string();
-    
-    if stream_name.is_empty() {
-        return Err(MultiplexedLogLineError::MissingComponent(
-            "Stream name is empty".to_string(),
-        ));
-    }
-    
-    // Extract the content (everything after the prefix and space)
-    let content = line[closing_bracket_pos + 2..].to_string();
-    
-    Ok(MultiplexedLogLine {
-        pid,
-        stream_name,
-        content,
-    })
 }
 
 /// Spawn a Python process that imports the given modules and then waits for commands on stdin.
@@ -976,82 +1050,5 @@ def main():
         runner.stop_isolated(&process_uuid)?;
 
         Ok(())
-    }
-
-    #[test]
-    fn test_parse_multiplexed_line() {
-        // Test 1: Valid line format
-        let test_line = "[PID:12345:stdout] Hello, world!";
-        let result = parse_multiplexed_line(test_line).unwrap();
-        assert_eq!(result.pid, 12345);
-        assert_eq!(result.stream_name, "stdout");
-        assert_eq!(result.content, "Hello, world!");
-
-        // Test 2: Valid line with stderr stream
-        let test_line = "[PID:9876:stderr] Error message";
-        let result = parse_multiplexed_line(test_line).unwrap();
-        assert_eq!(result.pid, 9876);
-        assert_eq!(result.stream_name, "stderr");
-        assert_eq!(result.content, "Error message");
-
-        // Test 3: Empty content should be valid
-        let test_line = "[PID:12345:stdout] ";
-        let result = parse_multiplexed_line(test_line).unwrap();
-        assert_eq!(result.content, "");
-
-        // Test 4: Missing prefix should return error
-        let test_line = "Hello, world!";
-        let result = parse_multiplexed_line(test_line);
-        assert!(result.is_err());
-        match result {
-            Err(MultiplexedLogLineError::InvalidFormat(msg)) => {
-                assert!(msg.contains("does not start with [PID:"));
-            }
-            _ => panic!("Expected InvalidFormat error"),
-        }
-
-        // Test 5: Invalid PID format should return error
-        let test_line = "[PID:abc:stdout] Hello, world!";
-        let result = parse_multiplexed_line(test_line);
-        assert!(result.is_err());
-        match result {
-            Err(MultiplexedLogLineError::PidParseError(_)) => {
-                // This is expected
-            }
-            _ => panic!("Expected PidParseError"),
-        }
-
-        // Test 6: Missing closing bracket should return error
-        let test_line = "[PID:12345:stdout Hello, world!";
-        let result = parse_multiplexed_line(test_line);
-        assert!(result.is_err());
-        match result {
-            Err(MultiplexedLogLineError::InvalidFormat(msg)) => {
-                assert!(msg.contains("Missing closing bracket"));
-            }
-            _ => panic!("Expected InvalidFormat error"),
-        }
-
-        // Test 7: Missing stream name should return error
-        let test_line = "[PID:12345:] Hello, world!";
-        let result = parse_multiplexed_line(test_line);
-        assert!(result.is_err());
-        match result {
-            Err(MultiplexedLogLineError::MissingComponent(msg)) => {
-                assert!(msg.contains("Stream name is empty"));
-            }
-            _ => panic!("Expected MissingComponent error"),
-        }
-
-        // Test 8: Malformed prefix should return error
-        let test_line = "[PID:12345] Hello, world!";
-        let result = parse_multiplexed_line(test_line);
-        assert!(result.is_err());
-        match result {
-            Err(MultiplexedLogLineError::InvalidFormat(msg)) => {
-                assert!(msg.contains("Expected format"));
-            }
-            _ => panic!("Expected InvalidFormat error"),
-        }
     }
 }
