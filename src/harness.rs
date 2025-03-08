@@ -252,7 +252,7 @@ def main():
         // Keep the temp_dir in scope until the end of the test
         let (pickled_data, python_env) = prepare_script_for_isolation(python_script, "main")?;
 
-        // Create a mock ImportRunner
+        // Create a mock Environment
         let mut runner = Environment::new("test_package", &python_env.container_path);
 
         // Boot the environment

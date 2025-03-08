@@ -1,4 +1,3 @@
-
 /// Represents the parsed components of a multiplexed log line
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultiplexedLogLine {
@@ -37,7 +36,6 @@ impl std::error::Error for MultiplexedLogLineError {
     }
 }
 
-
 /// Robustly parses a line using our multiplex logging convention
 /// Format: [PID:{pid}:{stream_name}] {content}
 ///
@@ -51,43 +49,47 @@ pub fn parse_multiplexed_line(line: &str) -> Result<MultiplexedLogLine, Multiple
             "Line does not start with [PID:".to_string(),
         ));
     }
-    
+
     // Find the closing bracket that ends the prefix
     let closing_bracket_pos = match line.find("] ") {
         Some(pos) => pos,
-        None => return Err(MultiplexedLogLineError::InvalidFormat(
-            "Missing closing bracket after prefix".to_string(),
-        )),
+        None => {
+            return Err(MultiplexedLogLineError::InvalidFormat(
+                "Missing closing bracket after prefix".to_string(),
+            ))
+        }
     };
-    
+
     // Extract the prefix content (without the brackets)
     let prefix = &line[5..closing_bracket_pos];
-    
+
     // Split the prefix by colon to get pid and stream_name
     let parts: Vec<&str> = prefix.split(':').collect();
-    
+
     if parts.len() != 2 {
-        return Err(MultiplexedLogLineError::InvalidFormat(
-            format!("Expected format [PID:pid:stream_name], got [PID:{}]", prefix),
-        ));
+        return Err(MultiplexedLogLineError::InvalidFormat(format!(
+            "Expected format [PID:pid:stream_name], got [PID:{}]",
+            prefix
+        )));
     }
-    
+
     // Parse the PID
-    let pid = parts[0].parse::<u32>()
+    let pid = parts[0]
+        .parse::<u32>()
         .map_err(MultiplexedLogLineError::PidParseError)?;
-    
+
     // Get the stream name
     let stream_name = parts[1].to_string();
-    
+
     if stream_name.is_empty() {
         return Err(MultiplexedLogLineError::MissingComponent(
             "Stream name is empty".to_string(),
         ));
     }
-    
+
     // Extract the content (everything after the prefix and space)
     let content = line[closing_bracket_pos + 2..].to_string();
-    
+
     Ok(MultiplexedLogLine {
         pid,
         stream_name,
@@ -95,12 +97,10 @@ pub fn parse_multiplexed_line(line: &str) -> Result<MultiplexedLogLine, Multiple
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    
     #[test]
     fn test_parse_multiplexed_line() {
         // Test 1: Valid line format

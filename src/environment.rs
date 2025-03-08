@@ -3,11 +3,11 @@ use anyhow::{anyhow, Result};
 use log::{debug, error, info, trace, warn};
 use owo_colors::OwoColorize;
 use serde_json::{self};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use crate::ast::ProjectAstManager;
 use crate::messages::{ExitRequest, ForkRequest, Message};
-use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
 use crate::multiplex_logs::{parse_multiplexed_line, MultiplexedLogLine};
+use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
 
 /// Result from a forked process
 #[derive(Debug, Clone)]
@@ -36,19 +36,24 @@ pub struct Layer {
     pub child: Child,                    // The forkable process with all imports loaded
     pub stdin: std::process::ChildStdin, // The stdin of the forkable process
     pub reader: std::io::Lines<BufReader<std::process::ChildStdout>>, // The reader of the forkable process
-    pub forked_processes: HashMap<String, i32>,                       // Map of UUID to PID
-    
+
+    pub forked_processes: HashMap<String, i32>, // Map of UUID to PID
+
     // New fields for thread-based monitoring
     pub result_map: HashMap<String, Option<ProcessResult>>, // Map of UUID to final result status
-    pub monitor_thread: Option<JoinHandle<()>>,              // Thread handle for monitoring output
-    pub thread_terminate_tx: Option<Sender<()>>,             // Channel to signal thread termination
+
+    // Condition variables for completion notification
+    pub completion_notifiers: HashMap<String, Arc<(Mutex<bool>, Condvar)>>, // Map of UUID to completion notifier
+
+    pub monitor_thread: Option<JoinHandle<()>>, // Thread handle for monitoring output
+    pub thread_terminate_tx: Option<Sender<()>>, // Channel to signal thread termination
 }
 
 /// Runner for isolated Python code execution
 pub struct Environment {
     pub id: String,
     pub layer: Option<Arc<Mutex<Layer>>>, // The current layer that is tied to this environment
-    pub ast_manager: ProjectAstManager, // Project AST manager for this environment
+    pub ast_manager: ProjectAstManager,   // Project AST manager for this environment
 
     first_scan: bool,
 }
@@ -176,10 +181,11 @@ impl Environment {
             reader: lines_iter,
             forked_processes: HashMap::new(),
             result_map: HashMap::new(),
+            completion_notifiers: HashMap::new(),
             monitor_thread: None,
             thread_terminate_tx: None,
         };
-        
+
         // Extract the reader for the monitor thread
         let stdout = layer.child.stdout.take();
         if let Some(stdout) = stdout {
@@ -200,7 +206,7 @@ impl Environment {
         let layer = match self.layer.as_ref() {
             Some(env) => env,
             None => {
-                info!("No layer to stop.");
+                info!("No environment to stop.");
                 return Ok(false);
             }
         };
@@ -209,8 +215,8 @@ impl Environment {
 
         let mut env_guard = layer
             .lock()
-            .map_err(|e| format!("Failed to lock layer mutex: {}", e))?;
-            
+            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+
         // Stop the monitor thread first
         env_guard.stop_monitor_thread();
 
@@ -224,9 +230,10 @@ impl Environment {
             warn!("Failed to wait for child process: {}", e);
         }
 
-        // Clear the process map
+        // Clear all the maps
         env_guard.forked_processes.clear();
         env_guard.result_map.clear();
+        env_guard.completion_notifiers.clear();
 
         info!("Main runner process stopped");
         Ok(true)
@@ -298,15 +305,15 @@ impl Environment {
     /// that spawned our hotreloader) so we can get the local function and closure variables.
     pub fn exec_isolated(&self, pickled_data: &str) -> Result<String, String> {
         // Check if environment is initialized
-        let layer = self
+        let environment = self
             .layer
             .as_ref()
-            .ok_or_else(|| "Layer not initialized. Call boot_main first.".to_string())?;
+            .ok_or_else(|| "Environment not initialized. Call boot_main first.".to_string())?;
 
         // Send the code to the forked process
-        let mut env_guard = layer
+        let mut env_guard = environment
             .lock()
-            .map_err(|e| format!("Failed to lock layer mutex: {}", e))?;
+            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
         let exec_code = format!(
             r#"
@@ -370,9 +377,15 @@ pickled_str = "{}"
             env_guard
                 .forked_processes
                 .insert(process_uuid.clone(), pid_val);
-            
+
             // Initialize an empty result entry for this process
             env_guard.result_map.insert(process_uuid.clone(), None);
+
+            // Create a condition variable for this process
+            let pair = Arc::new((Mutex::new(false), Condvar::new()));
+            env_guard
+                .completion_notifiers
+                .insert(process_uuid.clone(), pair);
         }
 
         Ok(process_uuid)
@@ -381,15 +394,15 @@ pickled_str = "{}"
     /// Stop an isolated process by UUID
     pub fn stop_isolated(&self, process_uuid: &str) -> Result<bool, String> {
         // Check if environment is initialized
-        let layer = self
+        let environment = self
             .layer
             .as_ref()
-            .ok_or_else(|| "Layer not initialized. Call boot_main first.".to_string())?;
+            .ok_or_else(|| "Environment not initialized. Call boot_main first.".to_string())?;
 
         info!("Stopping isolated process: {}", process_uuid);
-        let mut env_guard = layer
+        let mut env_guard = environment
             .lock()
-            .map_err(|e| format!("Failed to lock layer mutex: {}", e))?;
+            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
         // Check if the process UUID exists
         if !env_guard.forked_processes.contains_key(process_uuid) {
@@ -436,85 +449,128 @@ pickled_str = "{}"
         // Remove the process from our maps
         env_guard.forked_processes.remove(process_uuid);
         env_guard.result_map.remove(process_uuid);
-        
-        info!(
-            "Removed process UUID: {} from process maps",
-            process_uuid
-        );
+        env_guard.completion_notifiers.remove(process_uuid);
+
+        info!("Removed process UUID: {} from process maps", process_uuid);
 
         Ok(true)
     }
 
     /// Communicate with an isolated process to get its output
+    /// This function will block until the process has a result (success or error)
     pub fn communicate_isolated(&self, process_uuid: &str) -> Result<Option<String>, String> {
-        // Check if layer is initialized
-        let layer = self
+        // Check if environment is initialized
+        let environment = self
             .layer
             .as_ref()
-            .ok_or_else(|| "No layer available for communication".to_string())?;
+            .ok_or_else(|| "No environment available for communication".to_string())?;
 
-        let mut env_guard = layer
-            .lock()
-            .map_err(|e| format!("Failed to lock layer mutex: {}", e))?;
+        // First, check if the process exists
+        {
+            let env_guard = environment
+                .lock()
+                .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
-        // Check if the process exists
-        if !env_guard.forked_processes.contains_key(process_uuid) {
-            return Err(format!("Process {} does not exist", process_uuid));
-        }
-
-        // Check if we have a result for this process
-        match env_guard.result_map.get(process_uuid) {
-            Some(Some(ProcessResult::Complete(result))) => {
-                trace!("Found completion result for process {}", process_uuid);
-                return Ok(result.clone());
-            },
-            Some(Some(ProcessResult::Error(error))) => {
-                error!("Found error result for process {}: {}", process_uuid, error);
-                return Err(error.clone());
-            },
-            Some(Some(ProcessResult::Log(_))) => {
-                // Ignore log results, they should be printed directly
-                return Ok(None);
-            },
-            Some(None) | None => {
-                // No result yet or process doesn't have an entry
-                if !env_guard.result_map.contains_key(process_uuid) {
-                    // Initialize an empty result for this process
-                    env_guard.result_map.insert(process_uuid.to_string(), None);
-                }
-                trace!("No results available yet for process {}", process_uuid);
-                return Ok(None);
+            if !env_guard.forked_processes.contains_key(process_uuid) {
+                return Err(format!("Process {} does not exist", process_uuid));
             }
         }
+
+        // Now wait for the process to complete
+        let result = {
+            let mut env_guard = environment
+                .lock()
+                .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+
+            // Get the condition variable for this process
+            let notifier = match env_guard.completion_notifiers.get(process_uuid) {
+                Some(pair) => pair.clone(),
+                None => {
+                    // Create a new condition variable if it doesn't exist
+                    let pair = Arc::new((Mutex::new(false), Condvar::new()));
+                    env_guard
+                        .completion_notifiers
+                        .insert(process_uuid.to_string(), pair.clone());
+                    pair
+                }
+            };
+
+            // Release the lock so we don't block other operations
+            drop(env_guard);
+
+            // Wait on the condition variable
+            let (mutex, condvar) = &*notifier;
+            let completed = mutex
+                .lock()
+                .map_err(|e| format!("Failed to lock completion mutex: {:?}", e))?;
+
+            // If not completed, wait for the signal
+            if !*completed {
+                info!("Waiting for process {} to complete...", process_uuid);
+                let _completed = condvar
+                    .wait(completed)
+                    .map_err(|e| format!("Failed to wait on condvar: {:?}", e))?;
+            }
+
+            // Now that we've been signaled, reacquire the lock and get the result
+            let env_guard = environment
+                .lock()
+                .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+
+            // Get the result
+            match env_guard.result_map.get(process_uuid) {
+                Some(Some(ProcessResult::Complete(result))) => {
+                    trace!("Found completion result for process {}", process_uuid);
+                    Ok(result.clone())
+                }
+                Some(Some(ProcessResult::Error(error))) => {
+                    error!("Found error result for process {}: {}", process_uuid, error);
+                    Err(error.clone())
+                }
+                _ => {
+                    // This should not happen if the condition variable was properly signaled
+                    warn!("Condition variable was signaled but no result is available");
+                    Ok(None)
+                }
+            }
+        };
+
+        result
     }
 }
 
 impl Layer {
     /// Start a monitoring thread that continuously reads from the child process stdout
     /// and populates the result_map with parsed output
-    pub fn start_monitor_thread(&mut self, reader: std::io::Lines<BufReader<std::process::ChildStdout>>) {
+    pub fn start_monitor_thread(
+        &mut self,
+        reader: std::io::Lines<BufReader<std::process::ChildStdout>>,
+    ) {
         // Create a channel for signaling thread termination
         let (terminate_tx, terminate_rx) = mpsc::channel();
         self.thread_terminate_tx = Some(terminate_tx);
-        
+
         // Clone the result map into an Arc<Mutex<>> for sharing with the thread
         let result_map = Arc::new(Mutex::new(self.result_map.clone()));
-        
+
+        // Clone the completion notifiers map
+        let completion_notifiers = Arc::new(Mutex::new(self.completion_notifiers.clone()));
+
         // Clone the forked processes map for the thread to access
         let forked_processes = Arc::new(Mutex::new(self.forked_processes.clone()));
-        
+
         // Start the monitor thread
         let thread_handle = thread::spawn(move || {
             debug!("Monitor thread started");
             let mut reader = reader;
-            
+
             loop {
                 // Check if we've been asked to terminate
                 if terminate_rx.try_recv().is_ok() {
                     debug!("Monitor thread received terminate signal");
                     break;
                 }
-                
+
                 // Try to read a line from the child process
                 match reader.next() {
                     Some(Ok(line)) => {
@@ -522,33 +578,71 @@ impl Layer {
                         if let Ok(message) = serde_json::from_str::<Message>(&line) {
                             match message {
                                 Message::ChildComplete(complete) => {
-                                    trace!("Monitor thread received function result: {:?}", complete);
-                                    
-                                    // Find which process this belongs to (should be in JSON)
-                                    // In a real implementation we would identify the specific process
+                                    trace!(
+                                        "Monitor thread received function result: {:?}",
+                                        complete
+                                    );
+
+                                    // Find all processes
                                     let mut result_map = result_map.lock().unwrap();
-                                    for (_, result) in result_map.iter_mut() {
+                                    let process_uuids: Vec<String> =
+                                        result_map.keys().cloned().collect();
+
+                                    for uuid in process_uuids {
                                         // Store the final result status
-                                        *result = Some(ProcessResult::Complete(complete.result.clone()));
+                                        if let Some(result) = result_map.get_mut(&uuid) {
+                                            *result = Some(ProcessResult::Complete(
+                                                complete.result.clone(),
+                                            ));
+
+                                            // Notify waiters that the result is ready
+                                            let notifiers = completion_notifiers.lock().unwrap();
+                                            if let Some(pair) = notifiers.get(&uuid) {
+                                                let (mutex, condvar) = &**pair;
+                                                let mut completed = mutex.lock().unwrap();
+                                                *completed = true;
+                                                condvar.notify_all();
+                                            }
+                                        }
                                     }
-                                },
+                                }
                                 Message::ChildError(error) => {
                                     error!("Monitor thread received function error: {:?}", error);
-                                    
+
                                     // Format the error with traceback information if available
                                     let error_message = match error.traceback {
-                                        Some(traceback) => format!("{}\n\n{}", error.error, traceback),
+                                        Some(traceback) => {
+                                            format!("{}\n\n{}", error.error, traceback)
+                                        }
                                         None => error.error,
                                     };
-                                    
-                                    // Store the final error status
+
+                                    // Store the final error status for all processes
                                     let mut result_map = result_map.lock().unwrap();
-                                    for (_, result) in result_map.iter_mut() {
-                                        *result = Some(ProcessResult::Error(error_message.clone()));
+                                    let process_uuids: Vec<String> =
+                                        result_map.keys().cloned().collect();
+
+                                    for uuid in process_uuids {
+                                        if let Some(result) = result_map.get_mut(&uuid) {
+                                            *result =
+                                                Some(ProcessResult::Error(error_message.clone()));
+
+                                            // Notify waiters that the result is ready (even though it's an error)
+                                            let notifiers = completion_notifiers.lock().unwrap();
+                                            if let Some(pair) = notifiers.get(&uuid) {
+                                                let (mutex, condvar) = &**pair;
+                                                let mut completed = mutex.lock().unwrap();
+                                                *completed = true;
+                                                condvar.notify_all();
+                                            }
+                                        }
                                     }
-                                },
+                                }
                                 _ => {
-                                    trace!("Monitor thread received other message type: {:?}", message);
+                                    trace!(
+                                        "Monitor thread received other message type: {:?}",
+                                        message
+                                    );
                                 }
                             }
                         } else {
@@ -558,52 +652,56 @@ impl Layer {
                                     // Find which process this log belongs to based on PID
                                     let forked_processes = forked_processes.lock().unwrap();
                                     let mut process_uuid = None;
-                                    
+
                                     for (uuid, pid) in forked_processes.iter() {
                                         if *pid == log_line.pid as i32 {
                                             process_uuid = Some(uuid.clone());
                                             break;
                                         }
                                     }
-                                    
+
                                     // Just print the log, don't store it
                                     if let Some(uuid) = process_uuid {
-                                        println!("[{}:{}] {}", 
-                                            uuid, log_line.stream_name, log_line.content);
+                                        println!(
+                                            "[{}:{}] {}",
+                                            uuid, log_line.stream_name, log_line.content
+                                        );
                                     } else {
                                         // If we can't match it to a specific process, log it with PID
-                                        println!("Unmatched log: [{}:{}] {}", 
-                                            log_line.pid, log_line.stream_name, log_line.content);
+                                        println!(
+                                            "Unmatched log: [{}:{}] {}",
+                                            log_line.pid, log_line.stream_name, log_line.content
+                                        );
                                     }
-                                },
+                                }
                                 Err(_) => {
                                     // If parsing fails, print the raw line
                                     println!("Raw output: {}", line);
                                 }
                             }
                         }
-                    },
+                    }
                     Some(Err(e)) => {
                         error!("Error reading from child process: {}", e);
                         break;
-                    },
+                    }
                     None => {
                         // End of stream
                         debug!("End of child process output stream");
                         break;
                     }
                 }
-                
+
                 // Short sleep to avoid tight loop
                 thread::sleep(std::time::Duration::from_millis(10));
             }
-            
+
             debug!("Monitor thread terminated");
         });
-        
+
         self.monitor_thread = Some(thread_handle);
     }
-    
+
     /// Stop the monitoring thread if it's running
     pub fn stop_monitor_thread(&mut self) {
         if let Some(terminate_tx) = self.thread_terminate_tx.take() {
@@ -612,7 +710,7 @@ impl Layer {
                 warn!("Failed to send terminate signal to monitor thread: {}", e);
             }
         }
-        
+
         if let Some(handle) = self.monitor_thread.take() {
             debug!("Waiting for monitor thread to terminate");
             if let Err(e) = handle.join() {
@@ -709,14 +807,7 @@ mod tests {
         runner.first_scan = true;
 
         // Get the PID of the initial Python process
-        let initial_pid = runner
-            .layer
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .child
-            .id();
+        let initial_pid = runner.layer.as_ref().unwrap().lock().unwrap().child.id();
         println!("Initial process PID: {:?}", initial_pid);
 
         // First, prime the system by calling process_all_py_files to establish a baseline
@@ -738,14 +829,7 @@ mod tests {
         );
 
         // Get the PID after update with no changes
-        let unchanged_pid = runner
-            .layer
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .child
-            .id();
+        let unchanged_pid = runner.layer.as_ref().unwrap().lock().unwrap().child.id();
         println!("PID after no changes: {:?}", unchanged_pid);
 
         // Verify that the process was NOT restarted (PIDs should be the same)
@@ -776,14 +860,7 @@ mod tests {
         );
 
         // Get the PID of the new Python process
-        let new_pid = runner
-            .layer
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .child
-            .id();
+        let new_pid = runner.layer.as_ref().unwrap().lock().unwrap().child.id();
         println!("New process PID after import changes: {:?}", new_pid);
 
         // For completeness, but we don't expect this to pass since we didn't actually restart

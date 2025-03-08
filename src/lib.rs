@@ -14,8 +14,8 @@ pub mod ast;
 pub mod environment;
 pub mod harness;
 pub mod messages;
-pub mod scripts;
 pub mod multiplex_logs;
+pub mod scripts;
 
 // Export types from messages and scripts for public use
 pub use messages::{ExitRequest, ForkRequest, Message};
@@ -129,7 +129,10 @@ fn update_environment(_py: Python, env_id: &str) -> PyResult<bool> {
     })?;
 
     if updated {
-        info!("Environment updated successfully for environment: {}", env_id);
+        info!(
+            "Environment updated successfully for environment: {}",
+            env_id
+        );
     } else {
         debug!("No environment updates needed for environment: {}", env_id);
     }
@@ -255,11 +258,7 @@ fn stop_isolated(_py: Python, env_id: &str, process_uuid: &str) -> PyResult<bool
 
 /// Get output from an isolated process
 #[pyfunction]
-fn communicate_isolated(
-    _py: Python,
-    env_id: &str,
-    process_uuid: &str,
-) -> PyResult<Option<String>> {
+fn communicate_isolated(_py: Python, env_id: &str, process_uuid: &str) -> PyResult<Option<String>> {
     debug!(
         "Communicating with isolated process {} for environment {}",
         process_uuid, env_id
