@@ -148,6 +148,31 @@ def read_message() -> MessageBase | None:
 
     return MESSAGES[message_type](**payload)
 
+#
+# Logging
+#
+
+
+class MultiplexedStream:
+    def __init__(self, original_stream, stream_name: str):
+        self.original_stream = original_stream
+        self.stream_name = stream_name
+        self.pid = os.getpid()
+    
+    def write(self, text: str) -> int:
+        # Add PID prefix to each line (newlines and lines with values)
+        prefixed_text = ""
+        for line in text.splitlines(True):  # Keep line endings
+            prefixed_text += f"[PID:{self.pid}:{self.stream_name}] {line}"
+        return self.original_stream.write(prefixed_text)
+    
+    def flush(self) -> None:
+        return self.original_stream.flush()
+    
+    # Forward all other attributes to the original stream
+    def __getattr__(self, attr):
+        return getattr(self.original_stream, attr)
+
 
 #
 # Main Logic
@@ -180,6 +205,18 @@ def main():
                 # Set up globals and locals for execution
                 exec_globals = globals().copy()
                 exec_locals = {}
+
+                # Immediately route stdout and stderr to a custom convention that specifies the
+                # current pid, so our rust watcher can separate them from the single stdout stream
+                # that's inherited from the parent environment
+                
+                # Save original stdout and stderr
+                original_stdout = sys.stdout
+                original_stderr = sys.stderr
+                
+                # Replace with PID-prefixed versions
+                sys.stdout = MultiplexedStream(original_stdout, "stdout")
+                sys.stderr = MultiplexedStream(original_stderr, "stderr")
 
                 logging.info("Will execute code in forked process...")
                 sys.stdout.flush()
