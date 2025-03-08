@@ -6,10 +6,9 @@ use serde_json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Condvar};
 use std::thread;
 use std::time::Instant;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use libc;
 use std::io::BufRead;
@@ -19,6 +18,14 @@ use crate::ast::ProjectAstManager;
 use crate::messages::{ExitRequest, ForkRequest, Message};
 use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
 
+/// Represents the result of a forked process execution
+#[derive(Debug, Clone)]
+pub enum ProcessResult {
+    None,                 // No result yet
+    Success(Option<String>), // Process completed successfully with optional result
+    Error(String),        // Process encountered an error
+}
+
 /// A forked process to run isolated code
 #[derive(Debug)]
 pub struct ForkedProcess {
@@ -26,7 +33,7 @@ pub struct ForkedProcess {
     message_queue: Arc<Mutex<VecDeque<Message>>>,
     name: String,
     pid: i32,
-    completed: Arc<AtomicBool>, // Flag to indicate when the process has completed
+    completion: Arc<(Mutex<ProcessResult>, Condvar)>, // Mutex paired with Condvar for signaling completion
 }
 
 impl Clone for ForkedProcess {
@@ -36,7 +43,7 @@ impl Clone for ForkedProcess {
             message_queue: self.message_queue.clone(),
             name: self.name.clone(),
             pid: self.pid,
-            completed: self.completed.clone(),
+            completion: self.completion.clone(),
         }
     }
 }
@@ -424,7 +431,7 @@ pickled_str = "{}"
                 message_queue: message_queue.clone(),
                 name: name.to_string(),
                 pid: pid_val,
-                completed: Arc::new(AtomicBool::new(false)),
+                completion: Arc::new((Mutex::new(ProcessResult::None), Condvar::new())),
             };
 
             // Store the ForkedProcess
@@ -593,6 +600,27 @@ pickled_str = "{}"
 
         // Check if the process exists
         if !env_guard.forked_processes.contains_key(process_uuid) {
+            // Process might have completed and been removed
+            // Check the message queue for any final messages
+            // This is mostly kept for backward compatibility
+            for process in env_guard.forked_processes.values() {
+                if let Ok(mut queue) = process.message_queue.lock() {
+                    for message in queue.iter() {
+                        match message {
+                            Message::ChildComplete(complete) => {
+                                if complete.result.is_some() {
+                                    return Ok(complete.result.clone());
+                                }
+                            }
+                            Message::ChildError(error) => {
+                                return Err(error.error.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            
             return Err(format!("Process {} does not exist", process_uuid));
         }
 
@@ -602,85 +630,62 @@ pickled_str = "{}"
             .get(process_uuid)
             .ok_or_else(|| format!("Forked process {} not found", process_uuid))?;
 
-        // Get a clone of the completion flag and message queue before releasing the lock
-        let completed = forked_process.completed.clone();
-        let message_queue = forked_process.message_queue.clone();
+        // Get references to the things we need
+        let completion = forked_process.completion.clone();
         let process_name = forked_process.name.clone();
         
         // Release the environment lock to avoid deadlocks
         drop(env_guard);
 
         // Wait for the process to complete with a timeout
-        let start_time = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(30); // 30 second timeout
         
-        // Check periodically if the process has completed
-        while !completed.load(Ordering::SeqCst) {
-            // Check if we've hit the timeout
-            if start_time.elapsed() > timeout {
+        // Use the condition variable to wait for result
+        let (lock, cvar) = &*completion;
+        let mut result = lock.lock()
+            .map_err(|e| format!("Failed to lock completion mutex: {:?}", e))?;
+        
+        // If we don't have a result yet, wait for one
+        if matches!(*result, ProcessResult::None) {
+            debug!("Waiting for result from process {}", process_uuid);
+            
+            // Wait with timeout
+            let wait_result = cvar.wait_timeout(result, timeout)
+                .map_err(|e| format!("Failed to wait on condition variable: {:?}", e))?;
+                
+            if wait_result.1.timed_out() {
                 return Err(format!("Timeout waiting for process {} to complete", process_uuid));
             }
             
-            // Check if the process was removed from the environment
-            let process_exists = {
-                let env_guard = environment
-                    .lock()
-                    .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
-                env_guard.forked_processes.contains_key(process_uuid)
-            };
-            
-            if !process_exists {
-                debug!("Process {} was removed from the environment", process_uuid);
-                break; // Process was removed, so we can check for messages
-            }
-            
-            // Sleep for a short duration to avoid CPU spinning
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        
-        debug!("Process {} has completed or was removed, checking for messages", process_uuid);
-
-        // Try to lock the message queue
-        let mut queue_guard = message_queue
-            .lock()
-            .map_err(|e| format!("Failed to lock message queue: {}", e))?;
-
-        // If there are messages in the queue, process them
-        if !queue_guard.is_empty() {
-            // Take the first message from the queue
-            if let Some(message) = queue_guard.pop_front() {
-                match message {
-                    Message::ChildComplete(complete) => {
-                        trace!(
-                            "Received function result from {}: {:?}",
-                            process_name,
-                            complete
-                        );
-                        return Ok(complete.result);
-                    }
-                    Message::ChildError(error) => {
-                        error!(
-                            "Received function error from {}: {:?}",
-                            process_name, error
-                        );
-                        return Err(error.error);
-                    }
-                    _ => {
-                        trace!(
-                            "Received other message type from {}: {:?}",
-                            process_name,
-                            message
-                        );
-                        // Put the message back in the queue
-                        queue_guard.push_front(message);
-                        return Ok(None);
-                    }
-                }
-            }
+            // Here, result has been updated by the condition variable wait
+            debug!("Received result notification for process {}", process_uuid);
+        } else {
+            debug!("Process {} already has a result", process_uuid);
         }
 
-        // If we get here, there was no relevant output to read
-        Ok(None)
+        // Process the result
+        match &*result {
+            ProcessResult::Success(result_opt) => {
+                trace!(
+                    "Received success result from {}: {:?}",
+                    process_name,
+                    result_opt
+                );
+                Ok(result_opt.clone())
+            }
+            ProcessResult::Error(error) => {
+                error!(
+                    "Received error from {}: {}",
+                    process_name, error
+                );
+                Err(error.clone())
+            }
+            ProcessResult::None => {
+                // This should not happen after waiting, but just in case
+                warn!("No result available after waiting for process {}", process_uuid);
+                Ok(None)
+            }
+        }
     }
 
     /// Monitor the output of a specific process and queue messages or print logs
@@ -746,37 +751,100 @@ pickled_str = "{}"
                     match serde_json::from_str::<Message>(&line) {
                         Ok(message) => {
                             match message {
-                                Message::ChildComplete(_) | Message::ChildError(_) => {
-                                    // Queue completion or error messages
-                                    if let Ok(mut queue) = message_queue.lock() {
-                                        queue.push_back(message.clone());
-                                        debug!(
-                                            "Queued message: {:?} for process {} ({})",
-                                            message.name(),
-                                            process_name,
-                                            process_uuid
-                                        );
-                                    }
-
-                                    // If this is a completion or error, the process is done
-                                    // Mark the process as completed
+                                Message::ChildComplete(complete) => {
+                                    debug!(
+                                        "Process {} ({}) completed successfully",
+                                        process_name, process_uuid
+                                    );
+                                    
+                                    // Store the result directly in the completion field
                                     if let Ok(env_guard) = environment.lock() {
                                         if let Some(process) = env_guard.forked_processes.get(&process_uuid) {
-                                            process.completed.store(true, Ordering::SeqCst);
-                                            debug!("Marked process {} ({}) as completed", process_name, process_uuid);
+                                            let (lock, cvar) = &*process.completion;
+                                            if let Ok(mut result) = lock.lock() {
+                                                // Set the success result
+                                                *result = ProcessResult::Success(complete.result.clone());
+                                                // Notify waiters that the result is ready
+                                                cvar.notify_all();
+                                                debug!(
+                                                    "Set success result for process {} ({}) and notified waiters",
+                                                    process_name, process_uuid
+                                                );
+                                            }
                                         }
                                         
-                                        // Remove it from the forked_processes map
+                                        // Also queue the message for potential later consumption
+                                        if let Ok(mut queue) = message_queue.lock() {
+                                            queue.push_back(message.clone());
+                                            debug!(
+                                                "Queued message: {:?} for process {} ({})",
+                                                message.name(),
+                                                process_name,
+                                                process_uuid
+                                            );
+                                        }
+                                        
+                                        // Remove it from the forked_processes map after setting the result
                                         drop(env_guard);
                                         if let Ok(mut env_guard) = environment.lock() {
                                             env_guard.forked_processes.remove(&process_uuid);
-                                            debug!("Process {} ({}) completed, removed from forked processes", process_name, process_uuid);
+                                            debug!(
+                                                "Process {} ({}) completed, removed from forked processes",
+                                                process_name, process_uuid
+                                            );
                                         }
                                     }
 
                                     // Exit the monitoring thread
                                     break;
-                                }
+                                },
+                                Message::ChildError(error) => {
+                                    debug!(
+                                        "Process {} ({}) failed with error: {}",
+                                        process_name, process_uuid, error.error
+                                    );
+                                    
+                                    // Store the error directly in the completion field
+                                    if let Ok(env_guard) = environment.lock() {
+                                        if let Some(process) = env_guard.forked_processes.get(&process_uuid) {
+                                            let (lock, cvar) = &*process.completion;
+                                            if let Ok(mut result) = lock.lock() {
+                                                // Set the error result
+                                                *result = ProcessResult::Error(error.error.clone());
+                                                // Notify waiters that the result is ready
+                                                cvar.notify_all();
+                                                debug!(
+                                                    "Set error result for process {} ({}) and notified waiters",
+                                                    process_name, process_uuid
+                                                );
+                                            }
+                                        }
+                                        
+                                        // Also queue the message for potential later consumption
+                                        if let Ok(mut queue) = message_queue.lock() {
+                                            queue.push_back(message.clone());
+                                            debug!(
+                                                "Queued message: {:?} for process {} ({})",
+                                                message.name(),
+                                                process_name,
+                                                process_uuid
+                                            );
+                                        }
+                                        
+                                        // Remove it from the forked_processes map after setting the result
+                                        drop(env_guard);
+                                        if let Ok(mut env_guard) = environment.lock() {
+                                            env_guard.forked_processes.remove(&process_uuid);
+                                            debug!(
+                                                "Process {} ({}) completed with error, removed from forked processes",
+                                                process_name, process_uuid
+                                            );
+                                        }
+                                    }
+
+                                    // Exit the monitoring thread
+                                    break;
+                                },
                                 _ => {
                                     // Queue other structured messages
                                     if let Ok(mut queue) = message_queue.lock() {
@@ -796,12 +864,19 @@ pickled_str = "{}"
                         "Error reading from process {} ({}): {}",
                         process_name, process_uuid, e
                     );
-                    // There was an error reading, so the process might be gone
-                    // Mark the process as completed due to error
+                    
+                    // Set an error result for read errors
                     if let Ok(env_guard) = environment.lock() {
                         if let Some(process) = env_guard.forked_processes.get(&process_uuid) {
-                            process.completed.store(true, Ordering::SeqCst);
-                            debug!("Marked process {} ({}) as completed due to read error", process_name, process_uuid);
+                            let (lock, cvar) = &*process.completion;
+                            if let Ok(mut result) = lock.lock() {
+                                *result = ProcessResult::Error(format!("Read error: {}", e));
+                                cvar.notify_all();
+                                debug!(
+                                    "Set read error result for process {} ({}) and notified waiters",
+                                    process_name, process_uuid
+                                );
+                            }
                         }
                         
                         // Remove it from the forked_processes map
@@ -1065,10 +1140,10 @@ mod tests {
             let test_uuid = Uuid::new_v4().to_string();
             let test_pid = 12345;
 
-            // Create a mock message queue
+            // Create a mock message queue (mostly for backwards compatibility)
             let message_queue = Arc::new(Mutex::new(VecDeque::new()));
 
-            // Add a test message to the queue that communicate_isolated will return
+            // Generate a timestamp for our test result
             let timestamp = format!(
                 "{}",
                 std::time::SystemTime::now()
@@ -1076,6 +1151,8 @@ mod tests {
                     .unwrap()
                     .as_secs_f64()
             );
+
+            // Add a test message to the queue for backward compatibility
             let test_message = Message::ChildComplete(crate::messages::ChildComplete {
                 result: Some(timestamp.clone()),
             });
@@ -1086,13 +1163,14 @@ mod tests {
                 // Empty thread that immediately returns
             });
 
-            // Create a ForkedProcess struct
+            // Create a ForkedProcess struct with a successful result
+            let completion = Arc::new((Mutex::new(ProcessResult::Success(Some(timestamp.clone()))), Condvar::new()));
             let forked_process = ForkedProcess {
                 monitor_thread: Arc::new(Mutex::new(Some(handle))),
                 message_queue,
                 name: "test_process".to_string(),
                 pid: test_pid,
-                completed: Arc::new(AtomicBool::new(false)),
+                completion,
             };
 
             env_guard
@@ -1156,13 +1234,13 @@ mod tests {
             // Empty thread that immediately returns
         });
 
-        // Create a ForkedProcess struct
+        // Create a ForkedProcess struct with the initial state
         let forked_process = ForkedProcess {
             monitor_thread: Arc::new(Mutex::new(Some(handle))),
             message_queue,
             name: "test_isolated_process".to_string(),
             pid: test_pid,
-            completed: Arc::new(AtomicBool::new(false)),
+            completion: Arc::new((Mutex::new(ProcessResult::None), Condvar::new())),
         };
 
         // Add mock process to the forked_processes map
