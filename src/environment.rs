@@ -3,14 +3,15 @@ use anyhow::{anyhow, Result};
 use log::{debug, error, info, trace, warn};
 use owo_colors::OwoColorize;
 use serde_json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use std::thread;
 
 use libc;
 use std::io::BufRead;
-use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::ast::ProjectAstManager;
@@ -23,6 +24,8 @@ pub struct Environment {
     pub stdin: std::process::ChildStdin, // The stdin of the forkable process
     pub reader: std::io::Lines<BufReader<std::process::ChildStdout>>, // The reader of the forkable process
     pub forked_processes: HashMap<String, i32>,                       // Map of UUID to PID
+    pub message_queues: HashMap<String, Arc<Mutex<VecDeque<Message>>>>, // Message queues for each process
+    pub monitor_threads: HashMap<String, thread::JoinHandle<()>>,     // Monitor threads for each process
 }
 
 /// Runner for isolated Python code execution
@@ -156,6 +159,8 @@ impl ImportRunner {
             stdin,
             reader: lines_iter,
             forked_processes: HashMap::new(),
+            message_queues: HashMap::new(),
+            monitor_threads: HashMap::new(),
         };
 
         self.environment = Some(Arc::new(Mutex::new(environment)));
@@ -179,6 +184,24 @@ impl ImportRunner {
             .lock()
             .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
+        // First, kill all isolated processes
+        let process_uuids: Vec<String> = env_guard.forked_processes.keys().cloned().collect();
+        
+        // Drop the lock while stopping isolated processes to avoid deadlock
+        drop(env_guard);
+        
+        // Stop each isolated process
+        for uuid in &process_uuids {
+            if let Err(e) = self.stop_isolated(uuid) {
+                warn!("Failed to stop isolated process {}: {}", uuid, e);
+            }
+        }
+        
+        // Re-acquire the lock
+        let mut env_guard = environment
+            .lock()
+            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+
         // Kill the main child process
         if let Err(e) = env_guard.child.kill() {
             warn!("Failed to kill child process: {}", e);
@@ -189,10 +212,27 @@ impl ImportRunner {
             warn!("Failed to wait for child process: {}", e);
         }
 
-        // Clear the process map
+        // Clean up any remaining monitor threads
+        for (uuid, handle) in env_guard.monitor_threads.drain() {
+            // Drop the lock to avoid deadlock
+            drop(env_guard);
+            
+            if let Err(e) = handle.join() {
+                warn!("Failed to join monitor thread for process {}: {:?}", uuid, e);
+            }
+            
+            // Re-acquire the lock
+            env_guard = environment
+                .lock()
+                .map_err(|e| format!("Failed to re-lock environment mutex: {}", e))?;
+        }
+        
+        // Clear remaining resources
         env_guard.forked_processes.clear();
+        env_guard.message_queues.clear();
+        
+        info!("Main runner process stopped successfully");
 
-        info!("Main runner process stopped");
         Ok(true)
     }
 
@@ -260,7 +300,7 @@ impl ImportRunner {
 
     /// Execute a function in the isolated environment. This should be called from the main thread (the one
     /// that spawned our hotreloader) so we can get the local function and closure variables.
-    pub fn exec_isolated(&self, pickled_data: &str) -> Result<String, String> {
+    pub fn exec_isolated(&self, pickled_data: &str, name: &str) -> Result<String, String> {
         // Check if environment is initialized
         let environment = self
             .environment
@@ -334,9 +374,126 @@ pickled_str = "{}"
             env_guard
                 .forked_processes
                 .insert(process_uuid.clone(), pid_val);
+            
+            // Create a message queue for this process
+            let message_queue = Arc::new(Mutex::new(VecDeque::new()));
+            env_guard.message_queues.insert(process_uuid.clone(), message_queue.clone());
+            
+            // Create a clone of the environment arc for the monitoring thread
+            let env_arc = self.environment.as_ref().unwrap().clone();
+            let process_id = process_uuid.clone();
+            
+            // Start a monitoring thread for this process
+            let handle = thread::spawn(move || {
+                Self::monitor_process_output(env_arc, process_id, message_queue);
+            });
+            
+            // Store the thread handle
+            env_guard.monitor_threads.insert(process_uuid.clone(), handle);
         }
 
         Ok(process_uuid)
+    }
+    
+    /// Monitor the output of a specific process and queue messages or print logs
+    fn monitor_process_output(
+        environment: Arc<Mutex<Environment>>,
+        process_uuid: String,
+        message_queue: Arc<Mutex<VecDeque<Message>>>
+    ) {
+        debug!("Started monitoring thread for process: {}", process_uuid);
+        
+        // Continue until the process is no longer in the forked_processes map
+        loop {
+            // Check if the process still exists
+            let process_exists = {
+                let env_guard = match environment.lock() {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        error!("Failed to lock environment mutex in monitor thread: {}", e);
+                        break;
+                    }
+                };
+                env_guard.forked_processes.contains_key(&process_uuid)
+            };
+            
+            if !process_exists {
+                debug!("Process {} no longer exists, stopping monitor thread", process_uuid);
+                break;
+            }
+            
+            // Try to read from the reader
+            let read_result = {
+                let mut env_guard = match environment.lock() {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        error!("Failed to lock environment mutex for reading: {}", e);
+                        break;
+                    }
+                };
+                
+                match env_guard.reader.next() {
+                    Some(line_result) => line_result,
+                    None => {
+                        // End of stream, process might have ended
+                        debug!("End of stream for process {}, stopping monitor thread", process_uuid);
+                        break;
+                    }
+                }
+            };
+            
+            match read_result {
+                Ok(line) => {
+                    // Try to parse as a Message
+                    match serde_json::from_str::<Message>(&line) {
+                        Ok(message) => {
+                            match message {
+                                Message::ChildComplete(_) | Message::ChildError(_) => {
+                                    // Queue completion or error messages
+                                    if let Ok(mut queue) = message_queue.lock() {
+                                        queue.push_back(message.clone());
+                                        debug!("Queued message: {:?} for process {}", message.name(), process_uuid);
+                                    }
+                                    
+                                    // If this is a completion or error, the process is done
+                                    // Remove it from the forked_processes map
+                                    if let Ok(mut env_guard) = environment.lock() {
+                                        env_guard.forked_processes.remove(&process_uuid);
+                                        debug!("Process {} completed, removed from forked processes", process_uuid);
+                                    }
+                                    
+                                    // Exit the monitoring thread
+                                    break;
+                                },
+                                _ => {
+                                    // Queue other structured messages
+                                    if let Ok(mut queue) = message_queue.lock() {
+                                        queue.push_back(message);
+                                    }
+                                }
+                            }
+                        },
+                        Err(_) => {
+                            // Print non-structured output with [isolate] prefix
+                            println!("[isolate] {}", line);
+                        }
+                    }
+                },
+                Err(e) => {
+                    error!("Error reading from process {}: {}", process_uuid, e);
+                    // There was an error reading, so the process might be gone
+                    if let Ok(mut env_guard) = environment.lock() {
+                        env_guard.forked_processes.remove(&process_uuid);
+                    }
+                    break;
+                }
+            }
+            
+            // Small sleep to prevent CPU spinning
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        
+        debug!("Monitor thread for process {} exiting", process_uuid);
     }
 
     /// Stop an isolated process by UUID
@@ -396,8 +553,30 @@ pickled_str = "{}"
 
         // Remove the process from our map
         env_guard.forked_processes.remove(process_uuid);
+        
+        // Join the monitoring thread if it exists
+        if let Some(handle) = env_guard.monitor_threads.remove(process_uuid) {
+            // Drop the lock to avoid deadlock
+            drop(env_guard);
+            
+            // Join the thread - this might take a moment to clean up properly
+            if let Err(e) = handle.join() {
+                warn!("Failed to join monitor thread for process {}: {:?}", process_uuid, e);
+            } else {
+                debug!("Successfully joined monitor thread for process {}", process_uuid);
+            }
+            
+            // Re-acquire the lock to continue cleanup
+            env_guard = environment
+                .lock()
+                .map_err(|e| format!("Failed to re-lock environment mutex: {}", e))?;
+        }
+        
+        // Clean up the message queue
+        env_guard.message_queues.remove(process_uuid);
+        
         info!(
-            "Removed process UUID: {} from forked_processes map",
+            "Removed process UUID: {} from forked_processes map and cleaned up resources",
             process_uuid
         );
 
@@ -412,22 +591,34 @@ pickled_str = "{}"
             .as_ref()
             .ok_or_else(|| "No environment available for communication".to_string())?;
 
-        let mut env_guard = environment
+        let env_guard = environment
             .lock()
             .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
-        // Check if the process exists
-        if !env_guard.forked_processes.contains_key(process_uuid) {
-            return Err(format!("Process {} does not exist", process_uuid));
+        // Check if the process exists or has a message queue
+        if !env_guard.message_queues.contains_key(process_uuid) {
+            if !env_guard.forked_processes.contains_key(process_uuid) {
+                return Err(format!("Process {} does not exist", process_uuid));
+            }
+            // Process exists but hasn't sent any messages yet
+            return Ok(None);
         }
 
-        // Read from the process output
-        for line in &mut env_guard.reader {
-            let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
-
-            // Try to parse as a Message
-            match serde_json::from_str::<Message>(&line) {
-                Ok(message) => match message {
+        // Get the message queue for this process
+        let message_queue = env_guard.message_queues
+            .get(process_uuid)
+            .ok_or_else(|| format!("Message queue for process {} not found", process_uuid))?;
+        
+        // Try to lock the message queue
+        let mut queue_guard = message_queue
+            .lock()
+            .map_err(|e| format!("Failed to lock message queue: {}", e))?;
+        
+        // If there are messages in the queue, process them
+        if !queue_guard.is_empty() {
+            // Take the first message from the queue
+            if let Some(message) = queue_guard.pop_front() {
+                match message {
                     Message::ChildComplete(complete) => {
                         trace!("Received function result: {:?}", complete);
                         return Ok(complete.result);
@@ -438,17 +629,15 @@ pickled_str = "{}"
                     }
                     _ => {
                         trace!("Received other message type: {:?}", message);
+                        // Put the message back in the queue
+                        queue_guard.push_front(message);
+                        return Ok(None);
                     }
-                },
-                Err(_) => {
-                    // If parsing fails, print the raw line with an "[isolate]" prefix.
-                    println!("[isolate] {}", line);
-                    continue;
                 }
             }
         }
 
-        // If we get here, there was no output to read
+        // If we get here, there was no relevant output to read
         Ok(None)
     }
 }
@@ -528,6 +717,8 @@ mod tests {
             stdin,
             reader,
             forked_processes: HashMap::new(),
+            message_queues: HashMap::new(),
+            monitor_threads: HashMap::new(),
         };
 
         // Use a default package name for tests

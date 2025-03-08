@@ -184,6 +184,7 @@ fn exec_isolated<'py>(
     runner_id: &str,
     func: PyObject,
     args: Option<PyObject>,
+    name: &str,
 ) -> PyResult<&'py PyAny> {
     debug!(
         "Executing function in isolated process for runner: {}",
@@ -210,7 +211,7 @@ fn exec_isolated<'py>(
     let runners = IMPORT_RUNNERS.lock().unwrap();
     if let Some(runner) = runners.get(runner_id) {
         // Convert Rust Result<String, String> to PyResult
-        match runner.exec_isolated(&pickled_data) {
+        match runner.exec_isolated(&pickled_data, name) {
             Ok(result) => {
                 debug!("Function executed successfully in isolated process");
                 Ok(py.eval(&format!("'{}'", result), None, None)?)
