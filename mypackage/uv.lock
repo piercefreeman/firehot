@@ -104,7 +104,7 @@ name = "firehot"
 version = "0.1.0"
 source = { path = "../target/wheels/firehot-0.1.0-cp312-cp312-macosx_11_0_arm64.whl" }
 wheels = [
-    { filename = "firehot-0.1.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:09cb3adee49ba22ae4b91ed8a8935dd5b4223e64c59d2548cc8a779874f765fe" },
+    { filename = "firehot-0.1.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:37e89189deb7ce6634af1e4d759f91859e0cd6cef43f71a2522363149008ca88" },
 ]
 
 [[package]]

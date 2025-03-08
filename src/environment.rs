@@ -31,15 +31,15 @@ pub enum ProcessResult {
     Log(MultiplexedLogLine),
 }
 
-/// Runtime environment for executing Python code
-pub struct Environment {
+/// Runtime layer for executing Python code. This is a single "built" layer that should be immutable. Any client executed code will be in a forked process and any
+pub struct Layer {
     pub child: Child,                    // The forkable process with all imports loaded
     pub stdin: std::process::ChildStdin, // The stdin of the forkable process
     pub reader: std::io::Lines<BufReader<std::process::ChildStdout>>, // The reader of the forkable process
     pub forked_processes: HashMap<String, i32>,                       // Map of UUID to PID
     
     // New fields for thread-based monitoring
-    pub result_map: HashMap<String, VecDeque<ProcessResult>>, // Map of UUID to results queue
+    pub result_map: HashMap<String, Option<ProcessResult>>, // Map of UUID to final result status
     pub monitor_thread: Option<JoinHandle<()>>,              // Thread handle for monitoring output
     pub thread_terminate_tx: Option<Sender<()>>,             // Channel to signal thread termination
 }
@@ -47,7 +47,7 @@ pub struct Environment {
 /// Runner for isolated Python code execution
 pub struct ImportRunner {
     pub id: String,
-    pub environment: Option<Arc<Mutex<Environment>>>,
+    pub layer: Option<Arc<Mutex<Layer>>>, // The current layer that is tied to this environment
     pub ast_manager: ProjectAstManager, // Project AST manager for this environment
 
     first_scan: bool,
@@ -61,7 +61,7 @@ impl ImportRunner {
 
         Self {
             id: Uuid::new_v4().to_string(),
-            environment: None,
+            layer: None,
             ast_manager,
             first_scan: false,
         }
@@ -170,7 +170,7 @@ impl ImportRunner {
         );
 
         // Create the environment
-        let mut environment = Environment {
+        let mut layer = Layer {
             child,
             stdin,
             reader: lines_iter,
@@ -181,35 +181,35 @@ impl ImportRunner {
         };
         
         // Extract the reader for the monitor thread
-        let stdout = environment.child.stdout.take();
+        let stdout = layer.child.stdout.take();
         if let Some(stdout) = stdout {
             let reader = BufReader::new(stdout).lines();
             // Start the monitor thread
-            environment.start_monitor_thread(reader);
+            layer.start_monitor_thread(reader);
         } else {
             warn!("Failed to capture stdout for monitor thread");
         }
 
-        self.environment = Some(Arc::new(Mutex::new(environment)));
+        self.layer = Some(Arc::new(Mutex::new(layer)));
 
         Ok(())
     }
 
     pub fn stop_main(&self) -> Result<bool, String> {
         // Check if environment is initialized
-        let environment = match self.environment.as_ref() {
+        let layer = match self.layer.as_ref() {
             Some(env) => env,
             None => {
-                info!("No environment to stop.");
+                info!("No layer to stop.");
                 return Ok(false);
             }
         };
 
         info!("Stopping main runner process");
 
-        let mut env_guard = environment
+        let mut env_guard = layer
             .lock()
-            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+            .map_err(|e| format!("Failed to lock layer mutex: {}", e))?;
             
         // Stop the monitor thread first
         env_guard.stop_monitor_thread();
@@ -258,11 +258,11 @@ impl ImportRunner {
         );
 
         // Stop any existing processes
-        if let Some(env) = self.environment.as_ref() {
+        if let Some(env) = self.layer.as_ref() {
             let forked_processes = {
                 let env_guard = env
                     .lock()
-                    .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+                    .map_err(|e| format!("Failed to lock layer mutex: {}", e))?;
 
                 // Create a copy of the process UUIDs
                 env_guard
@@ -283,7 +283,7 @@ impl ImportRunner {
             self.stop_main()?;
         }
 
-        // Boot a new environment
+        // Boot a new layer
         self.boot_main()?;
 
         info!("Environment updated successfully");
@@ -298,15 +298,15 @@ impl ImportRunner {
     /// that spawned our hotreloader) so we can get the local function and closure variables.
     pub fn exec_isolated(&self, pickled_data: &str) -> Result<String, String> {
         // Check if environment is initialized
-        let environment = self
-            .environment
+        let layer = self
+            .layer
             .as_ref()
-            .ok_or_else(|| "Environment not initialized. Call boot_main first.".to_string())?;
+            .ok_or_else(|| "Layer not initialized. Call boot_main first.".to_string())?;
 
         // Send the code to the forked process
-        let mut env_guard = environment
+        let mut env_guard = layer
             .lock()
-            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+            .map_err(|e| format!("Failed to lock layer mutex: {}", e))?;
 
         let exec_code = format!(
             r#"
@@ -370,6 +370,9 @@ pickled_str = "{}"
             env_guard
                 .forked_processes
                 .insert(process_uuid.clone(), pid_val);
+            
+            // Initialize an empty result entry for this process
+            env_guard.result_map.insert(process_uuid.clone(), None);
         }
 
         Ok(process_uuid)
@@ -378,15 +381,15 @@ pickled_str = "{}"
     /// Stop an isolated process by UUID
     pub fn stop_isolated(&self, process_uuid: &str) -> Result<bool, String> {
         // Check if environment is initialized
-        let environment = self
-            .environment
+        let layer = self
+            .layer
             .as_ref()
-            .ok_or_else(|| "Environment not initialized. Call boot_main first.".to_string())?;
+            .ok_or_else(|| "Layer not initialized. Call boot_main first.".to_string())?;
 
         info!("Stopping isolated process: {}", process_uuid);
-        let mut env_guard = environment
+        let mut env_guard = layer
             .lock()
-            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+            .map_err(|e| format!("Failed to lock layer mutex: {}", e))?;
 
         // Check if the process UUID exists
         if !env_guard.forked_processes.contains_key(process_uuid) {
@@ -430,10 +433,12 @@ pickled_str = "{}"
             warn!("Failed to flush child stdin: {}", e);
         }
 
-        // Remove the process from our map
+        // Remove the process from our maps
         env_guard.forked_processes.remove(process_uuid);
+        env_guard.result_map.remove(process_uuid);
+        
         info!(
-            "Removed process UUID: {} from forked_processes map",
+            "Removed process UUID: {} from process maps",
             process_uuid
         );
 
@@ -442,53 +447,49 @@ pickled_str = "{}"
 
     /// Communicate with an isolated process to get its output
     pub fn communicate_isolated(&self, process_uuid: &str) -> Result<Option<String>, String> {
-        // Check if environment is initialized
-        let environment = self
-            .environment
+        // Check if layer is initialized
+        let layer = self
+            .layer
             .as_ref()
-            .ok_or_else(|| "No environment available for communication".to_string())?;
+            .ok_or_else(|| "No layer available for communication".to_string())?;
 
-        let mut env_guard = environment
+        let mut env_guard = layer
             .lock()
-            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+            .map_err(|e| format!("Failed to lock layer mutex: {}", e))?;
 
         // Check if the process exists
         if !env_guard.forked_processes.contains_key(process_uuid) {
             return Err(format!("Process {} does not exist", process_uuid));
         }
 
-        // Check if we have results for this process
-        if let Some(queue) = env_guard.result_map.get_mut(process_uuid) {
-            // Process any results in the queue
-            while let Some(result) = queue.pop_front() {
-                match result {
-                    ProcessResult::Complete(result) => {
-                        trace!("Found completion result for process {}", process_uuid);
-                        return Ok(result);
-                    },
-                    ProcessResult::Error(error) => {
-                        error!("Found error result for process {}: {}", process_uuid, error);
-                        return Err(error);
-                    },
-                    ProcessResult::Log(log_line) => {
-                        // Print log lines to stdout with appropriate formatting
-                        println!("[{}:{}] {}", 
-                            process_uuid, log_line.stream_name, log_line.content);
-                    }
+        // Check if we have a result for this process
+        match env_guard.result_map.get(process_uuid) {
+            Some(Some(ProcessResult::Complete(result))) => {
+                trace!("Found completion result for process {}", process_uuid);
+                return Ok(result.clone());
+            },
+            Some(Some(ProcessResult::Error(error))) => {
+                error!("Found error result for process {}: {}", process_uuid, error);
+                return Err(error.clone());
+            },
+            Some(Some(ProcessResult::Log(_))) => {
+                // Ignore log results, they should be printed directly
+                return Ok(None);
+            },
+            Some(None) | None => {
+                // No result yet or process doesn't have an entry
+                if !env_guard.result_map.contains_key(process_uuid) {
+                    // Initialize an empty result for this process
+                    env_guard.result_map.insert(process_uuid.to_string(), None);
                 }
+                trace!("No results available yet for process {}", process_uuid);
+                return Ok(None);
             }
-        } else {
-            // Create an empty queue for this process if it doesn't exist yet
-            env_guard.result_map.insert(process_uuid.to_string(), VecDeque::new());
         }
-
-        // If we got here, there are no results ready yet
-        trace!("No results available yet for process {}", process_uuid);
-        Ok(None)
     }
 }
 
-impl Environment {
+impl Layer {
     /// Start a monitoring thread that continuously reads from the child process stdout
     /// and populates the result_map with parsed output
     pub fn start_monitor_thread(&mut self, reader: std::io::Lines<BufReader<std::process::ChildStdout>>) {
@@ -523,11 +524,12 @@ impl Environment {
                                 Message::ChildComplete(complete) => {
                                     trace!("Monitor thread received function result: {:?}", complete);
                                     
-                                    // Add the result to all process result queues
-                                    // In a real implementation, we would need to identify which process this belongs to
+                                    // Find which process this belongs to (should be in JSON)
+                                    // In a real implementation we would identify the specific process
                                     let mut result_map = result_map.lock().unwrap();
-                                    for (_, queue) in result_map.iter_mut() {
-                                        queue.push_back(ProcessResult::Complete(complete.result.clone()));
+                                    for (_, result) in result_map.iter_mut() {
+                                        // Store the final result status
+                                        *result = Some(ProcessResult::Complete(complete.result.clone()));
                                     }
                                 },
                                 Message::ChildError(error) => {
@@ -539,10 +541,10 @@ impl Environment {
                                         None => error.error,
                                     };
                                     
-                                    // Add the error to all process result queues
+                                    // Store the final error status
                                     let mut result_map = result_map.lock().unwrap();
-                                    for (_, queue) in result_map.iter_mut() {
-                                        queue.push_back(ProcessResult::Error(error_message.clone()));
+                                    for (_, result) in result_map.iter_mut() {
+                                        *result = Some(ProcessResult::Error(error_message.clone()));
                                     }
                                 },
                                 _ => {
@@ -564,19 +566,12 @@ impl Environment {
                                         }
                                     }
                                     
-                                    // If we found a matching process, add the log to its queue
+                                    // Just print the log, don't store it
                                     if let Some(uuid) = process_uuid {
-                                        let mut result_map = result_map.lock().unwrap();
-                                        if let Some(queue) = result_map.get_mut(&uuid) {
-                                            queue.push_back(ProcessResult::Log(log_line.clone()));
-                                        } else {
-                                            // Create a new queue for this process
-                                            let mut queue = VecDeque::new();
-                                            queue.push_back(ProcessResult::Log(log_line.clone()));
-                                            result_map.insert(uuid, queue);
-                                        }
+                                        println!("[{}:{}] {}", 
+                                            uuid, log_line.stream_name, log_line.content);
                                     } else {
-                                        // If we can't match it to a specific process, log it
+                                        // If we can't match it to a specific process, log it with PID
                                         println!("Unmatched log: [{}:{}] {}", 
                                             log_line.pid, log_line.stream_name, log_line.content);
                                     }
@@ -686,9 +681,9 @@ mod tests {
         runner.boot_main().expect("Failed to boot main environment");
 
         // Check that the environment exists and has an empty forked_processes map
-        assert!(runner.environment.is_some());
+        assert!(runner.layer.is_some());
         assert!(runner
-            .environment
+            .layer
             .as_ref()
             .unwrap()
             .lock()
@@ -715,7 +710,7 @@ mod tests {
 
         // Get the PID of the initial Python process
         let initial_pid = runner
-            .environment
+            .layer
             .as_ref()
             .unwrap()
             .lock()
@@ -744,7 +739,7 @@ mod tests {
 
         // Get the PID after update with no changes
         let unchanged_pid = runner
-            .environment
+            .layer
             .as_ref()
             .unwrap()
             .lock()
@@ -782,7 +777,7 @@ mod tests {
 
         // Get the PID of the new Python process
         let new_pid = runner
-            .environment
+            .layer
             .as_ref()
             .unwrap()
             .lock()
@@ -811,7 +806,7 @@ mod tests {
 
         // Set up a mock test process
         {
-            let env = runner.environment.as_ref().unwrap();
+            let env = runner.layer.as_ref().unwrap();
             let mut env_guard = env.lock().unwrap();
 
             // Create a test UUID and add it to the forked processes map
@@ -900,7 +895,7 @@ mod tests {
         runner.boot_main().expect("Failed to boot main environment");
 
         // Create a test process UUID
-        let env = runner.environment.as_ref().unwrap();
+        let env = runner.layer.as_ref().unwrap();
         let mut env_guard = env.lock().unwrap();
 
         // Use a fixed UUID for testing
@@ -918,7 +913,7 @@ mod tests {
         // Verify the process is in the forked_processes map
         {
             let processes = runner
-                .environment
+                .layer
                 .as_ref()
                 .unwrap()
                 .lock()
@@ -949,7 +944,7 @@ mod tests {
         // Verify the process is no longer in the forked_processes map
         {
             let processes = runner
-                .environment
+                .layer
                 .as_ref()
                 .unwrap()
                 .lock()
