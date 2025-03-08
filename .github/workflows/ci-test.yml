@@ -109,5 +109,7 @@ jobs:
         echo "$PWD/.venv/bin" >> $GITHUB_PATH
         
     - name: Run tests
+      env:
+        FIREHOT_LOG_LEVEL: trace
       run: |
         make test-hotreload
