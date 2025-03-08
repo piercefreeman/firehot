@@ -527,7 +527,7 @@ pickled_str = "{}"
                         }
                         Err(_) => {
                             // Print non-structured output with [name] prefix
-                            println!("[{}] {}", process_name, line);
+                            println!("[{}] {}", format!("{}", process_name).bold().cyan(), line);
                         }
                     }
                 }
