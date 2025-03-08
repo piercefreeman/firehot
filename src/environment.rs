@@ -14,9 +14,10 @@ use std::io::BufRead;
 use uuid::Uuid;
 
 use crate::ast::ProjectAstManager;
-use crate::layer::{Layer, ProcessResult};
+use crate::layer::{Layer, ProcessResult, ForkResult};
 use crate::messages::{ExitRequest, ForkRequest, Message};
 use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
+use crate::async_resolve::AsyncResolve;
 
 /// Runner for isolated Python code execution
 pub struct Environment {
@@ -149,8 +150,8 @@ impl Environment {
             stdin,
             reader: Some(lines_iter),
             forked_processes: HashMap::new(),
-            result_map: HashMap::new(),
-            completion_notifiers: HashMap::new(),
+            fork_resolvers: HashMap::new(),
+            completion_resolvers: HashMap::new(),
             monitor_thread: None,
             thread_terminate_tx: None,
         };
@@ -194,8 +195,8 @@ impl Environment {
 
         // Clear all the maps
         env_guard.forked_processes.clear();
-        env_guard.result_map.clear();
-        env_guard.completion_notifiers.clear();
+        env_guard.fork_resolvers.clear();
+        env_guard.completion_resolvers.clear();
 
         info!("Main runner process stopped");
         Ok(true)
@@ -263,7 +264,7 @@ impl Environment {
     // Isolated process management
     //
 
-    /// Execute a function in the isolated environment. This should be called from the main thread (the one
+    /// This function executes code in a forked process (not in the main process
     /// that spawned our hotreloader) so we can get the local function and closure variables.
     pub fn exec_isolated(&self, pickled_data: &str) -> Result<String, String> {
         // Check if environment is initialized
@@ -280,14 +281,12 @@ impl Environment {
             .lock()
             .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
-        // Initialize an empty result entry for this process before sending the request
-        env_guard.result_map.insert(process_uuid.clone(), None);
-
-        // Create a condition variable for this process
-        let pair = Arc::new((Mutex::new(false), Condvar::new()));
-        env_guard
-            .completion_notifiers
-            .insert(process_uuid.clone(), pair.clone());
+        // Create async resolvers for both fork status and completion
+        let fork_resolver = AsyncResolve::new();
+        env_guard.fork_resolvers.insert(process_uuid.clone(), fork_resolver.clone());
+        
+        let completion_resolver = AsyncResolve::new();
+        env_guard.completion_resolvers.insert(process_uuid.clone(), completion_resolver.clone());
 
         let exec_code = format!(
             r#"
@@ -317,38 +316,19 @@ pickled_str = "{}"
         // Release the lock so we don't block other operations
         drop(env_guard);
 
-        // Wait on the condition variable
-        let (mutex, condvar) = &*pair;
-        let completed = mutex
-            .lock()
-            .map_err(|e| format!("Failed to lock completion mutex: {:?}", e))?;
-
-        // If not completed, wait for the signal
-        if !*completed {
-            debug!("Waiting for fork response for process {}...", process_uuid);
-            let _completed = condvar
-                .wait(completed)
-                .map_err(|e| format!("Failed to wait on condvar: {:?}", e))?;
-        }
-
-        // Now that we've been signaled, reacquire the lock and get the result
-        let env_guard = environment
-            .lock()
-            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
-
-        // Check the result
-        match env_guard.result_map.get(&process_uuid) {
-            Some(Some(ProcessResult::Complete(_))) => {
+        // Wait for the fork to complete
+        debug!("Waiting for fork status for process {}...", process_uuid);
+        match fork_resolver.wait() {
+            Ok(ForkResult::Complete(_)) => {
                 debug!("Fork completed successfully for process {}", process_uuid);
                 Ok(process_uuid)
             }
-            Some(Some(ProcessResult::Error(error))) => {
+            Ok(ForkResult::Error(error)) => {
                 error!("Fork error for process {}: {}", process_uuid, error);
-                Err(error.clone())
+                Err(error)
             }
-            _ => {
-                // This should not happen if the condition variable was properly signaled
-                warn!("Condition variable was signaled but no result is available");
+            Err(e) => {
+                warn!("Error waiting for fork status: {}", e);
                 Err("Fork operation failed with unknown error".to_string())
             }
         }
@@ -411,94 +391,59 @@ pickled_str = "{}"
 
         // Remove the process from our maps
         env_guard.forked_processes.remove(process_uuid);
-        env_guard.result_map.remove(process_uuid);
-        env_guard.completion_notifiers.remove(process_uuid);
+        env_guard.fork_resolvers.remove(process_uuid);
+        env_guard.completion_resolvers.remove(process_uuid);
 
         info!("Removed process UUID: {} from process maps", process_uuid);
 
         Ok(true)
     }
 
-    /// Communicate with an isolated process to get its output
-    /// This function will block until the process has a result (success or error)
+    /// Retrieve the result of an isolated execution
     pub fn communicate_isolated(&self, process_uuid: &str) -> Result<Option<String>, String> {
         // Check if environment is initialized
         let environment = self
             .layer
             .as_ref()
-            .ok_or_else(|| "No environment available for communication".to_string())?;
+            .ok_or_else(|| "Environment not initialized. Call boot_main first.".to_string())?;
 
-        // First, check if the process exists
-        {
-            let env_guard = environment
-                .lock()
-                .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+        let env_guard = environment
+            .lock()
+            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
-            if !env_guard.forked_processes.contains_key(process_uuid) {
-                return Err(format!("Process {} does not exist", process_uuid));
-            }
+        // Check if the process exists
+        if !env_guard.forked_processes.contains_key(process_uuid) {
+            return Err(format!("No forked process found with UUID: {}", process_uuid));
         }
 
-        // Now wait for the process to complete
-        let result = {
-            let mut env_guard = environment
-                .lock()
-                .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
-
-            // Get the condition variable for this process
-            let notifier = match env_guard.completion_notifiers.get(process_uuid) {
-                Some(pair) => pair.clone(),
-                None => {
-                    // Create a new condition variable if it doesn't exist
-                    let pair = Arc::new((Mutex::new(false), Condvar::new()));
-                    env_guard
-                        .completion_notifiers
-                        .insert(process_uuid.to_string(), pair.clone());
-                    pair
-                }
-            };
-
-            // Release the lock so we don't block other operations
-            drop(env_guard);
-
-            // Wait on the condition variable
-            let (mutex, condvar) = &*notifier;
-            let completed = mutex
-                .lock()
-                .map_err(|e| format!("Failed to lock completion mutex: {:?}", e))?;
-
-            // If not completed, wait for the signal
-            if !*completed {
-                info!("Waiting for process {} to complete...", process_uuid);
-                let _completed = condvar
-                    .wait(completed)
-                    .map_err(|e| format!("Failed to wait on condvar: {:?}", e))?;
-            }
-
-            // Now that we've been signaled, reacquire the lock and get the result
-            let env_guard = environment
-                .lock()
-                .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
-
-            // Get the result
-            match env_guard.result_map.get(process_uuid) {
-                Some(Some(ProcessResult::Complete(result))) => {
-                    trace!("Found completion result for process {}", process_uuid);
-                    Ok(result.clone())
-                }
-                Some(Some(ProcessResult::Error(error))) => {
-                    error!("Found error result for process {}: {}", process_uuid, error);
-                    Err(error.clone())
-                }
-                _ => {
-                    // This should not happen if the condition variable was properly signaled
-                    warn!("Condition variable was signaled but no result is available");
-                    Ok(None)
-                }
+        // Get the completion resolver for this process
+        let completion_resolver = match env_guard.completion_resolvers.get(process_uuid) {
+            Some(resolver) => resolver.clone(),
+            None => {
+                // This shouldn't happen if the process exists in forked_processes
+                return Err(format!("No completion resolver found for process: {}", process_uuid));
             }
         };
 
-        result
+        // Release the lock while we wait
+        drop(env_guard);
+
+        // Wait for the result
+        debug!("Waiting for result for process: {}", process_uuid);
+        match completion_resolver.wait() {
+            Ok(ProcessResult::Complete(result)) => {
+                debug!("Process {} completed successfully", process_uuid);
+                Ok(result)
+            }
+            Ok(ProcessResult::Error(error)) => {
+                error!("Process {} failed with error: {}", process_uuid, error);
+                Err(error)
+            }
+            Err(e) => {
+                warn!("Error waiting for completion: {}", e);
+                Err(format!("Failed to get result for process: {}", e))
+            }
+        }
     }
 }
 

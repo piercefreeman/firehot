@@ -9,6 +9,7 @@ use std::thread::{self, JoinHandle};
 
 use crate::messages::Message;
 use crate::multiplex_logs::{parse_multiplexed_line, MultiplexedLogLine};
+use crate::async_resolve::AsyncResolve;
 
 /// Result from the initial fork
 #[derive(Debug, Clone)]
@@ -26,8 +27,8 @@ pub enum ProcessResult {
     Complete(Option<String>),
     /// Process failed with an error message
     Error(String),
-    /// Raw log output from the process
-    Log(MultiplexedLogLine),
+    // Raw log output from the process
+    //Log(MultiplexedLogLine),
 }
 
 
@@ -40,12 +41,10 @@ pub struct Layer {
     pub forked_processes: HashMap<String, i32>, // Map of UUID to PID
 
     // These are pinged when the forked process finishes startup - either successful or failure
-    pub fork_status_map: HashMap<String, Option<ForkResult>>, // Map of UUID to fork result
-    pub fork_notifiers: HashMap<String, Arc<(Mutex<bool>, Condvar)>>, // Map of UUID to fork notifier
-
-    // Condition variables for completion notification
-    pub result_map: HashMap<String, Option<ProcessResult>>, // Map of UUID to final result status
-    pub completion_notifiers: HashMap<String, Arc<(Mutex<bool>, Condvar)>>, // Map of UUID to completion notifier
+    pub fork_resolvers: HashMap<String, AsyncResolve<ForkResult>>, // Map of UUID to fork resolver
+    
+    // These are pinged when the process completes execution
+    pub completion_resolvers: HashMap<String, AsyncResolve<ProcessResult>>, // Map of UUID to completion resolver
 
     pub monitor_thread: Option<JoinHandle<()>>, // Thread handle for monitoring output
     pub thread_terminate_tx: Option<Sender<()>>, // Channel to signal thread termination
@@ -62,13 +61,9 @@ impl Layer {
         // Take ownership of the reader
         let reader = self.reader.take().expect("Reader should be available");
 
-        // Clone the result map into an Arc<Mutex<>> for sharing with the thread
-        let result_map = Arc::new(Mutex::new(self.result_map.clone()));
-        let completion_notifiers = Arc::new(Mutex::new(self.completion_notifiers.clone()));
-
-        // Clone the fork notifiers map
-        let fork_status_map = Arc::new(Mutex::new(self.fork_status_map.clone()));
-        let fork_notifiers = Arc::new(Mutex::new(self.fork_notifiers.clone()));
+        // Clone the resolvers for sharing with the thread
+        let fork_resolvers = Arc::new(Mutex::new(self.fork_resolvers.clone()));
+        let completion_resolvers = Arc::new(Mutex::new(self.completion_resolvers.clone()));
 
         // Clone the forked processes map for the thread to access
         let forked_processes = Arc::new(Mutex::new(self.forked_processes.clone()));
@@ -108,10 +103,8 @@ impl Layer {
                                     Self::handle_message(
                                         &log_line.content,
                                         Some(&uuid),
-                                        &result_map,
-                                        &completion_notifiers,
-                                        &fork_status_map,
-                                        &fork_notifiers,
+                                        &fork_resolvers,
+                                        &completion_resolvers,
                                         &forked_processes
                                     );
                                 } else {
@@ -127,14 +120,12 @@ impl Layer {
                                 Self::handle_message(
                                     &line,
                                     None,
-                                    &result_map,
-                                    &completion_notifiers,
-                                    &fork_status_map,
-                                    &fork_notifiers,
+                                    &fork_resolvers,
+                                    &completion_resolvers,
                                     &forked_processes
                                 );
                             }
-                        }
+                        } 
                     }
                     Some(Err(e)) => {
                         error!("Error reading from child process: {}", e);
@@ -150,20 +141,17 @@ impl Layer {
                 // Short sleep to avoid tight loop
                 thread::sleep(std::time::Duration::from_millis(10));
             }
-
-            debug!("Monitor thread terminated");
         });
 
         self.monitor_thread = Some(thread_handle);
     }
 
+    /// Handle various messages from the child process
     fn handle_message(
         content: &str,
         uuid: Option<&String>,
-        result_map: &Arc<Mutex<HashMap<String, Option<ProcessResult>>>>,
-        completion_notifiers: &Arc<Mutex<HashMap<String, Arc<(Mutex<bool>, Condvar)>>>>,
-        fork_status_map: &Arc<Mutex<HashMap<String, Option<ForkResult>>>>,
-        fork_notifiers: &Arc<Mutex<HashMap<String, Arc<(Mutex<bool>, Condvar)>>>>,
+        fork_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ForkResult>>>>,
+        completion_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ProcessResult>>>>,
         forked_processes: &Arc<Mutex<HashMap<String, i32>>>
     ) {
         if let Ok(message) = serde_json::from_str::<Message>(content) {
@@ -175,29 +163,20 @@ impl Layer {
                         response
                     );
 
-                    // Store the fork response in the result map
-                    let mut result_map_guard = result_map.lock().unwrap();
-
-                    result_map_guard.insert(
-                        response.response_id,
+                    // Store the PID in the forked processes map
+                    let mut forked_processes_guard = forked_processes.lock().unwrap();
+                    forked_processes_guard.insert(
+                        response.request_id.clone(),
                         response.child_pid,
                     );
+                    drop(forked_processes_guard);
                     
-                    // Update the fork status map
-                    let mut fork_status_map = fork_status_map.lock().unwrap();
-                    fork_status_map.insert(
-                        response.response_id,
-                        Some(ForkResult::Complete(response.child_pid)),
-                    );
-
-                    // Notify waiters that the fork is ready
-                    let notifiers = fork_notifiers.lock().unwrap();
-                    if let Some(pair) = notifiers.get(&response.response_id) {
-                        let (mutex, condvar) = &**pair;
-                        let mut completed = mutex.lock().unwrap();
-                        *completed = true;
-                        condvar.notify_all();
+                    // Resolve the fork status
+                    let fork_resolvers_guard = fork_resolvers.lock().unwrap();
+                    if let Some(resolver) = fork_resolvers_guard.get(&response.request_id) {
+                        resolver.resolve(ForkResult::Complete(Some(response.child_pid.to_string())));
                     }
+                    drop(fork_resolvers_guard);
                 }
                 Message::ChildComplete(complete) => {
                     trace!(
@@ -209,73 +188,55 @@ impl Layer {
                     // from the child process
                     let uuid = uuid.expect("UUID should be known");
                     
-                    // Find all processes
-                    let mut result_map = result_map.lock().unwrap();
-                    if let Some(result) = result_map.get_mut(&uuid)
-                        {
-                            *result = Some(ProcessResult::Complete(
-                                complete.result.clone(),
-                            ));
-
-                            // Notify waiters that the result is ready
-                            // TODO: Refactor this into a common handler
-                            let notifiers =
-                                completion_notifiers.lock().unwrap();
-                            if let Some(pair) = notifiers.get(&uuid) {
-                                let (mutex, condvar) = &**pair;
-                                let mut completed =
-                                    mutex.lock().unwrap();
-                                *completed = true;
-                                condvar.notify_all();
-                            }
-                        }
+                    // Resolve the completion
+                    let completion_resolvers_guard = completion_resolvers.lock().unwrap();
+                    if let Some(resolver) = completion_resolvers_guard.get(uuid) {
+                        resolver.resolve(ProcessResult::Complete(complete.result.clone()));
+                    }
+                    drop(completion_resolvers_guard);
                 }
                 Message::ChildError(error) => {
-                    error!(
-                        "Monitor thread received function error: {:?}",
+                    trace!(
+                        "Monitor thread received error result: {:?}",
                         error
                     );
 
                     // We should always have a known UUID to receive this status, since it's issued
                     // from the child process
                     let uuid = uuid.expect("UUID should be known");
-
-                    // Format the error with traceback information if available
-                    let error_message = match error.traceback {
-                        Some(traceback) => {
-                            format!("{}\n\n{}", error.error, traceback)
-                        }
-                        None => error.error,
-                    };
-
-                    // Store the final error status for all processes
-                    let mut result_map = result_map.lock().unwrap();
-                    let process_uuids: Vec<String> =
-                    result_map.keys().cloned().collect();
-
-                    if let Some(result) = result_map.get_mut(&uuid)
-                    {
-                        *result = Some(ProcessResult::Error(
-                            error_message.clone(),
-                        ));
-
-                        // Notify waiters that the result is ready (even though it's an error)
-                        let notifiers =
-                            completion_notifiers.lock().unwrap();
-                        if let Some(pair) = notifiers.get(&uuid) {
-                            let (mutex, condvar) = &**pair;
-                            let mut completed =
-                                mutex.lock().unwrap();
-                            *completed = true;
-                            condvar.notify_all();
-                        }
+                    
+                    // Resolve the completion with an error
+                    let completion_resolvers_guard = completion_resolvers.lock().unwrap();
+                    if let Some(resolver) = completion_resolvers_guard.get(uuid) {
+                        resolver.resolve(ProcessResult::Error(error.error.clone()));
                     }
+                    drop(completion_resolvers_guard);
+                }
+                /*Message::ForkError(error) => {
+                    warn!(
+                        "Monitor thread received fork error: {:?}",
+                        error
+                    );
+
+                    // Resolve the fork status with an error
+                    let fork_resolvers_guard = fork_resolvers.lock().unwrap();
+                    if let Some(resolver) = fork_resolvers_guard.get(&error.request_id) {
+                        resolver.resolve(ForkResult::Error(error.error.clone()));
+                    }
+                    drop(fork_resolvers_guard);
+                }*/
+                Message::UnknownError(error) => {
+                    error!(
+                        "Monitor thread received unknown error: {}",
+                        error.error
+                    );
+
+                    // For unknown errors, we don't have a UUID, so we can't resolve a specific promise
+                    // Only log the error for now
                 }
                 _ => {
-                    trace!(
-                        "Monitor thread received other message type: {:?}",
-                        message
-                    );
+                    // Ignore other message types
+                    trace!("Monitor thread received unknown message type");
                 }
             }
         } else {

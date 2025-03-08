@@ -16,6 +16,7 @@ pub mod harness;
 pub mod layer;
 pub mod messages;
 pub mod multiplex_logs;
+pub mod async_resolve;
 pub mod scripts;
 
 // Export types from messages and scripts for public use
