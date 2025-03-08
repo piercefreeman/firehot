@@ -1,12 +1,12 @@
 use anstream::eprintln;
 use anyhow::{anyhow, Result};
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, warn};
 use owo_colors::OwoColorize;
 use serde_json::{self};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::{BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use libc;
@@ -14,10 +14,10 @@ use std::io::BufRead;
 use uuid::Uuid;
 
 use crate::ast::ProjectAstManager;
-use crate::layer::{Layer, ProcessResult, ForkResult};
+use crate::async_resolve::AsyncResolve;
+use crate::layer::{ForkResult, Layer, ProcessResult};
 use crate::messages::{ExitRequest, ForkRequest, Message};
 use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
-use crate::async_resolve::AsyncResolve;
 
 /// Runner for isolated Python code execution
 pub struct Environment {
@@ -145,16 +145,7 @@ impl Environment {
         );
 
         // Create the environment
-        let mut layer = Layer {
-            child,
-            stdin,
-            reader: Some(lines_iter),
-            forked_processes: HashMap::new(),
-            fork_resolvers: HashMap::new(),
-            completion_resolvers: HashMap::new(),
-            monitor_thread: None,
-            thread_terminate_tx: None,
-        };
+        let mut layer = Layer::new(child, stdin, lines_iter);
 
         // Start the monitor thread
         layer.start_monitor_thread();
@@ -180,23 +171,46 @@ impl Environment {
             .lock()
             .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
-        // Stop the monitor thread first
-        env_guard.stop_monitor_thread();
-
-        // Kill the main child process
+        // IMPORTANT: Kill the main child process FIRST
+        info!("Killing child process to unblock monitor thread");
         if let Err(e) = env_guard.child.kill() {
             warn!("Failed to kill child process: {}", e);
         }
 
         // Wait for the process to exit
+        info!("Waiting for child process to exit");
         if let Err(e) = env_guard.child.wait() {
             warn!("Failed to wait for child process: {}", e);
+        } else {
+            info!("Child process exited successfully");
         }
 
+        // Now it's safe to stop the monitor thread, since the child process stdout
+        // has been closed and the reader.next() in the monitor thread should return None
+        info!("Now stopping monitor thread");
+        env_guard.stop_monitor_thread();
+
         // Clear all the maps
-        env_guard.forked_processes.clear();
-        env_guard.fork_resolvers.clear();
-        env_guard.completion_resolvers.clear();
+        let mut forked_processes = env_guard
+            .forked_processes
+            .lock()
+            .map_err(|e| format!("Failed to lock forked processes: {}", e))?;
+        forked_processes.clear();
+        drop(forked_processes);
+
+        let mut fork_resolvers = env_guard
+            .fork_resolvers
+            .lock()
+            .map_err(|e| format!("Failed to lock fork resolvers: {}", e))?;
+        fork_resolvers.clear();
+        drop(fork_resolvers);
+
+        let mut completion_resolvers = env_guard
+            .completion_resolvers
+            .lock()
+            .map_err(|e| format!("Failed to lock completion resolvers: {}", e))?;
+        completion_resolvers.clear();
+        drop(completion_resolvers);
 
         info!("Main runner process stopped");
         Ok(true)
@@ -234,9 +248,14 @@ impl Environment {
                     .lock()
                     .map_err(|e| format!("Failed to lock layer mutex: {}", e))?;
 
-                // Create a copy of the process UUIDs
-                env_guard
+                // Get the forked processes mutex
+                let forked_processes_guard = env_guard
                     .forked_processes
+                    .lock()
+                    .map_err(|e| format!("Failed to lock forked processes: {}", e))?;
+
+                // Create a copy of the process UUIDs
+                forked_processes_guard
                     .keys()
                     .cloned()
                     .collect::<Vec<String>>()
@@ -283,10 +302,20 @@ impl Environment {
 
         // Create async resolvers for both fork status and completion
         let fork_resolver = AsyncResolve::new();
-        env_guard.fork_resolvers.insert(process_uuid.clone(), fork_resolver.clone());
-        
+        let mut fork_resolvers = env_guard
+            .fork_resolvers
+            .lock()
+            .map_err(|e| format!("Failed to lock fork resolvers: {}", e))?;
+        fork_resolvers.insert(process_uuid.clone(), fork_resolver.clone());
+        drop(fork_resolvers);
+
         let completion_resolver = AsyncResolve::new();
-        env_guard.completion_resolvers.insert(process_uuid.clone(), completion_resolver.clone());
+        let mut completion_resolvers = env_guard
+            .completion_resolvers
+            .lock()
+            .map_err(|e| format!("Failed to lock completion resolvers: {}", e))?;
+        completion_resolvers.insert(process_uuid.clone(), completion_resolver.clone());
+        drop(completion_resolvers);
 
         let exec_code = format!(
             r#"
@@ -348,13 +377,19 @@ pickled_str = "{}"
             .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
         // Check if the process UUID exists
-        if !env_guard.forked_processes.contains_key(process_uuid) {
+        let forked_processes = env_guard
+            .forked_processes
+            .lock()
+            .map_err(|e| format!("Failed to lock forked processes: {}", e))?;
+
+        if !forked_processes.contains_key(process_uuid) {
             warn!("No forked process found with UUID: {}", process_uuid);
             return Ok(false); // Nothing to stop
         }
 
-        let pid = env_guard.forked_processes[process_uuid];
+        let pid = forked_processes[process_uuid];
         info!("Found process with PID: {}", pid);
+        drop(forked_processes);
 
         // Try to kill the process by PID
         unsafe {
@@ -390,9 +425,26 @@ pickled_str = "{}"
         }
 
         // Remove the process from our maps
-        env_guard.forked_processes.remove(process_uuid);
-        env_guard.fork_resolvers.remove(process_uuid);
-        env_guard.completion_resolvers.remove(process_uuid);
+        let mut forked_processes = env_guard
+            .forked_processes
+            .lock()
+            .map_err(|e| format!("Failed to lock forked processes: {}", e))?;
+        forked_processes.remove(process_uuid);
+        drop(forked_processes);
+
+        let mut fork_resolvers = env_guard
+            .fork_resolvers
+            .lock()
+            .map_err(|e| format!("Failed to lock fork resolvers: {}", e))?;
+        fork_resolvers.remove(process_uuid);
+        drop(fork_resolvers);
+
+        let mut completion_resolvers = env_guard
+            .completion_resolvers
+            .lock()
+            .map_err(|e| format!("Failed to lock completion resolvers: {}", e))?;
+        completion_resolvers.remove(process_uuid);
+        drop(completion_resolvers);
 
         info!("Removed process UUID: {} from process maps", process_uuid);
 
@@ -412,36 +464,53 @@ pickled_str = "{}"
             .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
         // Check if the process exists
-        if !env_guard.forked_processes.contains_key(process_uuid) {
-            return Err(format!("No forked process found with UUID: {}", process_uuid));
-        }
+        let forked_processes = env_guard
+            .forked_processes
+            .lock()
+            .map_err(|e| format!("Failed to lock forked processes: {}", e))?;
 
-        // Get the completion resolver for this process
-        let completion_resolver = match env_guard.completion_resolvers.get(process_uuid) {
+        if !forked_processes.contains_key(process_uuid) {
+            return Err(format!(
+                "No forked process found with UUID: {}",
+                process_uuid
+            ));
+        }
+        drop(forked_processes);
+
+        // Get the completion resolver
+        let completion_resolvers = env_guard
+            .completion_resolvers
+            .lock()
+            .map_err(|e| format!("Failed to lock completion resolvers: {}", e))?;
+
+        let completion_resolver = match completion_resolvers.get(process_uuid) {
             Some(resolver) => resolver.clone(),
             None => {
-                // This shouldn't happen if the process exists in forked_processes
-                return Err(format!("No completion resolver found for process: {}", process_uuid));
+                return Err(format!(
+                    "No completion resolver found for UUID: {}",
+                    process_uuid
+                ))
             }
         };
+        drop(completion_resolvers);
 
-        // Release the lock while we wait
+        // Release the environment guard so we don't block other operations
         drop(env_guard);
 
-        // Wait for the result
-        debug!("Waiting for result for process: {}", process_uuid);
+        // Wait for the completion
+        debug!("Waiting for process completion: {}", process_uuid);
         match completion_resolver.wait() {
             Ok(ProcessResult::Complete(result)) => {
-                debug!("Process {} completed successfully", process_uuid);
+                debug!("Process completed successfully: {}", process_uuid);
                 Ok(result)
             }
             Ok(ProcessResult::Error(error)) => {
-                error!("Process {} failed with error: {}", process_uuid, error);
+                error!("Process error for UUID {}: {}", process_uuid, error);
                 Err(error)
             }
             Err(e) => {
-                warn!("Error waiting for completion: {}", e);
-                Err(format!("Failed to get result for process: {}", e))
+                warn!("Error waiting for process completion: {}", e);
+                Err("Process completion failed with unknown error".to_string())
             }
         }
     }
@@ -507,14 +576,9 @@ mod tests {
 
         // Check that the environment exists and has an empty forked_processes map
         assert!(runner.layer.is_some());
-        assert!(runner
-            .layer
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .forked_processes
-            .is_empty());
+        let env_guard = runner.layer.as_ref().unwrap().lock().unwrap();
+        let forked_processes = env_guard.forked_processes.lock().unwrap();
+        assert!(forked_processes.is_empty());
     }
 
     #[test]
@@ -616,9 +680,17 @@ mod tests {
             // Create a test UUID and add it to the forked processes map
             let test_uuid = Uuid::new_v4().to_string();
             let test_pid = 12345;
-            env_guard
-                .forked_processes
-                .insert(test_uuid.clone(), test_pid);
+
+            // Lock the forked_processes map and insert the test process
+            let mut forked_processes = env_guard.forked_processes.lock().unwrap();
+            forked_processes.insert(test_uuid.clone(), test_pid);
+            drop(forked_processes);
+
+            // Create a completion resolver for the test UUID
+            let completion_resolver = AsyncResolve::new();
+            let mut completion_resolvers = env_guard.completion_resolvers.lock().unwrap();
+            completion_resolvers.insert(test_uuid.clone(), completion_resolver.clone());
+            drop(completion_resolvers);
 
             // Create a temporary file with our mock output
             let temp_file = tempfile::NamedTempFile::new().unwrap();
@@ -700,37 +772,44 @@ mod tests {
 
         // Create a test process UUID
         let env = runner.layer.as_ref().unwrap();
-        let mut env_guard = env.lock().unwrap();
+        let env_guard = env.lock().unwrap();
 
         // Use a fixed UUID for testing
         let test_uuid = Uuid::new_v4().to_string();
         let test_pid = 23456;
 
         // Add mock process to the forked_processes map
-        env_guard
-            .forked_processes
-            .insert(test_uuid.clone(), test_pid);
+        let mut forked_processes = env_guard.forked_processes.lock().unwrap();
+        forked_processes.insert(test_uuid.clone(), test_pid);
+        drop(forked_processes);
+
+        // Create the required resolvers
+        let fork_resolver = AsyncResolve::new();
+        let mut fork_resolvers = env_guard.fork_resolvers.lock().unwrap();
+        fork_resolvers.insert(test_uuid.clone(), fork_resolver.clone());
+        drop(fork_resolvers);
+
+        let completion_resolver = AsyncResolve::new();
+        let mut completion_resolvers = env_guard.completion_resolvers.lock().unwrap();
+        completion_resolvers.insert(test_uuid.clone(), completion_resolver.clone());
+        drop(completion_resolvers);
 
         // Drop the guard so we can call stop_isolated
         drop(env_guard);
 
         // Verify the process is in the forked_processes map
         {
-            let processes = runner
-                .layer
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .forked_processes
-                .clone();
+            let env_guard = runner.layer.as_ref().unwrap().lock().unwrap();
+
+            let forked_processes = env_guard.forked_processes.lock().unwrap();
             assert!(
-                processes.contains_key(&test_uuid),
+                forked_processes.contains_key(&test_uuid),
                 "Process UUID should be in the forked_processes map"
             );
 
-            let pid = processes.get(&test_uuid).unwrap();
+            let pid = *forked_processes.get(&test_uuid).unwrap();
             println!("Process PID: {}", pid);
+            drop(forked_processes);
         }
 
         // Now stop the process
@@ -747,18 +826,14 @@ mod tests {
 
         // Verify the process is no longer in the forked_processes map
         {
-            let processes = runner
-                .layer
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .forked_processes
-                .clone();
+            let env_guard = runner.layer.as_ref().unwrap().lock().unwrap();
+
+            let forked_processes = env_guard.forked_processes.lock().unwrap();
             assert!(
-                !processes.contains_key(&test_uuid),
+                !forked_processes.contains_key(&test_uuid),
                 "Process UUID should be removed from the forked_processes map after termination"
             );
+            drop(forked_processes);
         }
 
         // Try to communicate with the terminated process
