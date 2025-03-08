@@ -458,6 +458,9 @@ pickled_str = "{}"
     }
 }
 
+/// Parses a line of stdout for our multiplex logging convention
+fn parse_multiplexed_line(line: &str) -> Option<(String, String)> {}
+
 /// Spawn a Python process that imports the given modules and then waits for commands on stdin.
 /// The Python process prints "IMPORTS_LOADED" to stdout once all imports are complete.
 /// After that, it will listen for commands on stdin, which can include fork requests and code to execute.
