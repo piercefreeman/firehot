@@ -26,7 +26,7 @@ pub enum ProcessResult {
 pub struct Layer {
     pub child: Child,                    // The forkable process with all imports loaded
     pub stdin: std::process::ChildStdin, // The stdin of the forkable process
-    pub reader: std::io::Lines<BufReader<std::process::ChildStdout>>, // The reader of the forkable process
+    pub reader: Option<std::io::Lines<BufReader<std::process::ChildStdout>>>, // The reader of the forkable process
 
     pub forked_processes: HashMap<String, i32>, // Map of UUID to PID
 
@@ -43,13 +43,13 @@ pub struct Layer {
 impl Layer {
     /// Start a monitoring thread that continuously reads from the child process stdout
     /// and populates the result_map with parsed output
-    pub fn start_monitor_thread(
-        &mut self,
-        reader: std::io::Lines<BufReader<std::process::ChildStdout>>,
-    ) {
+    pub fn start_monitor_thread(&mut self) {
         // Create a channel for signaling thread termination
         let (terminate_tx, terminate_rx) = mpsc::channel();
         self.thread_terminate_tx = Some(terminate_tx);
+
+        // Take ownership of the reader
+        let reader = self.reader.take().expect("Reader should be available");
 
         // Clone the result map into an Arc<Mutex<>> for sharing with the thread
         let result_map = Arc::new(Mutex::new(self.result_map.clone()));
@@ -75,110 +75,147 @@ impl Layer {
                 // Try to read a line from the child process
                 match reader.next() {
                     Some(Ok(line)) => {
-                        // First, try to parse it as a Message
-                        if let Ok(message) = serde_json::from_str::<Message>(&line) {
-                            match message {
-                                Message::ChildComplete(complete) => {
-                                    trace!(
-                                        "Monitor thread received function result: {:?}",
-                                        complete
-                                    );
+                        // All lines streamed from the python process (even our own messages)
+                        // should be multiplexed lines
+                        match parse_multiplexed_line(&line) {
+                            Ok(log_line) => {
+                                // Find which process this log belongs to based on PID
+                                let forked_definitions = forked_processes.lock().unwrap();
+                                let mut process_uuid = None;
 
-                                    // Find all processes
-                                    let mut result_map = result_map.lock().unwrap();
-                                    let process_uuids: Vec<String> =
-                                        result_map.keys().cloned().collect();
+                                for (uuid, pid) in forked_definitions.iter() {
+                                    if *pid == log_line.pid as i32 {
+                                        process_uuid = Some(uuid.clone());
+                                        break;
+                                    }
+                                }
 
-                                    for uuid in process_uuids {
-                                        // Store the final result status
-                                        if let Some(result) = result_map.get_mut(&uuid) {
-                                            *result = Some(ProcessResult::Complete(
-                                                complete.result.clone(),
-                                            ));
+                                // Just print the log, don't store it
+                                if let Some(uuid) = process_uuid {
 
-                                            // Notify waiters that the result is ready
-                                            let notifiers = completion_notifiers.lock().unwrap();
-                                            if let Some(pair) = notifiers.get(&uuid) {
-                                                let (mutex, condvar) = &**pair;
-                                                let mut completed = mutex.lock().unwrap();
-                                                *completed = true;
-                                                condvar.notify_all();
+                                    if let Ok(message) = serde_json::from_str::<Message>(&line) {
+                                        match message {
+                                            Message::ChildComplete(complete) => {
+                                                trace!(
+                                                    "Monitor thread received function result: {:?}",
+                                                    complete
+                                                );
+            
+                                                // Find all processes
+                                                let mut result_map = result_map.lock().unwrap();
+                                                let process_uuids: Vec<String> =
+                                                    result_map.keys().cloned().collect();
+            
+                                                for uuid in process_uuids {
+                                                    // Store the final result status
+                                                    if let Some(result) = result_map.get_mut(&uuid) {
+                                                        *result = Some(ProcessResult::Complete(
+                                                            complete.result.clone(),
+                                                        ));
+            
+                                                        // Notify waiters that the result is ready
+                                                        let notifiers = completion_notifiers.lock().unwrap();
+                                                        if let Some(pair) = notifiers.get(&uuid) {
+                                                            let (mutex, condvar) = &**pair;
+                                                            let mut completed = mutex.lock().unwrap();
+                                                            *completed = true;
+                                                            condvar.notify_all();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Message::ForkResponse(response) => {
+                                                // Handle fork response and update the forked processes map
+                                                debug!(
+                                                    "Monitor thread received fork response: {:?}",
+                                                    response
+                                                );
+                                                
+                                                // Store the fork response in the result map
+                                                let mut result_map_guard = result_map.lock().unwrap();
+                                                for (uuid, value) in result_map_guard.iter_mut() {
+                                                    if value.is_none() {
+                                                        // Store the PID in the forked processes map
+                                                        let mut forked_processes_guard = forked_processes.lock().unwrap();
+                                                        forked_processes_guard.insert(uuid.clone(), response.child_pid);
+                                                        drop(forked_processes_guard);
+                                                        
+                                                        // Update the result with the successful fork
+                                                        *value = Some(ProcessResult::Complete(
+                                                            Some(uuid.clone())
+                                                        ));
+                                                        
+                                                        // Notify waiters that the fork is ready
+                                                        let notifiers_guard = completion_notifiers.lock().unwrap();
+                                                        if let Some(pair) = notifiers_guard.get(uuid) {
+                                                            let (mutex, condvar) = &**pair;
+                                                            let mut completed = mutex.lock().unwrap();
+                                                            *completed = true;
+                                                            condvar.notify_all();
+                                                        }
+                                                        
+                                                        // Only handle the first unassigned process
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            Message::ChildError(error) => {
+                                                error!("Monitor thread received function error: {:?}", error);
+            
+                                                // Format the error with traceback information if available
+                                                let error_message = match error.traceback {
+                                                    Some(traceback) => {
+                                                        format!("{}\n\n{}", error.error, traceback)
+                                                    }
+                                                    None => error.error,
+                                                };
+            
+                                                // Store the final error status for all processes
+                                                let mut result_map = result_map.lock().unwrap();
+                                                let process_uuids: Vec<String> =
+                                                    result_map.keys().cloned().collect();
+            
+                                                for uuid in process_uuids {
+                                                    if let Some(result) = result_map.get_mut(&uuid) {
+                                                        *result =
+                                                            Some(ProcessResult::Error(error_message.clone()));
+            
+                                                        // Notify waiters that the result is ready (even though it's an error)
+                                                        let notifiers = completion_notifiers.lock().unwrap();
+                                                        if let Some(pair) = notifiers.get(&uuid) {
+                                                            let (mutex, condvar) = &**pair;
+                                                            let mut completed = mutex.lock().unwrap();
+                                                            *completed = true;
+                                                            condvar.notify_all();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                trace!(
+                                                    "Monitor thread received other message type: {:?}",
+                                                    message
+                                                );
                                             }
                                         }
-                                    }
-                                }
-                                Message::ChildError(error) => {
-                                    error!("Monitor thread received function error: {:?}", error);
-
-                                    // Format the error with traceback information if available
-                                    let error_message = match error.traceback {
-                                        Some(traceback) => {
-                                            format!("{}\n\n{}", error.error, traceback)
-                                        }
-                                        None => error.error,
-                                    };
-
-                                    // Store the final error status for all processes
-                                    let mut result_map = result_map.lock().unwrap();
-                                    let process_uuids: Vec<String> =
-                                        result_map.keys().cloned().collect();
-
-                                    for uuid in process_uuids {
-                                        if let Some(result) = result_map.get_mut(&uuid) {
-                                            *result =
-                                                Some(ProcessResult::Error(error_message.clone()));
-
-                                            // Notify waiters that the result is ready (even though it's an error)
-                                            let notifiers = completion_notifiers.lock().unwrap();
-                                            if let Some(pair) = notifiers.get(&uuid) {
-                                                let (mutex, condvar) = &**pair;
-                                                let mut completed = mutex.lock().unwrap();
-                                                *completed = true;
-                                                condvar.notify_all();
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    trace!(
-                                        "Monitor thread received other message type: {:?}",
-                                        message
-                                    );
-                                }
-                            }
-                        } else {
-                            // Try to parse it as a multiplexed log line
-                            match parse_multiplexed_line(&line) {
-                                Ok(log_line) => {
-                                    // Find which process this log belongs to based on PID
-                                    let forked_processes = forked_processes.lock().unwrap();
-                                    let mut process_uuid = None;
-
-                                    for (uuid, pid) in forked_processes.iter() {
-                                        if *pid == log_line.pid as i32 {
-                                            process_uuid = Some(uuid.clone());
-                                            break;
-                                        }
-                                    }
-
-                                    // Just print the log, don't store it
-                                    if let Some(uuid) = process_uuid {
+                                    } else {
+                                        // Just a regular stdout/stderr: print it with the contextual context
                                         println!(
                                             "[{}:{}] {}",
                                             uuid, log_line.stream_name, log_line.content
                                         );
-                                    } else {
-                                        // If we can't match it to a specific process, log it with PID
-                                        println!(
-                                            "Unmatched log: [{}:{}] {}",
-                                            log_line.pid, log_line.stream_name, log_line.content
-                                        );
                                     }
+                                } else {
+                                    // If we can't match it to a specific process, log it with PID
+                                    println!(
+                                        "Unmatched log: [{}:{}] {}",
+                                        log_line.pid, log_line.stream_name, log_line.content
+                                    );
                                 }
-                                Err(_) => {
-                                    // If parsing fails, print the raw line
-                                    println!("Raw output: {}", line);
-                                }
+                            }
+                            Err(_) => {
+                                // If parsing fails, print the raw line
+                                println!("Non-multiplexed output seen: {}", line);
                             }
                         }
                     }

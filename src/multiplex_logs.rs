@@ -51,7 +51,7 @@ pub fn parse_multiplexed_line(line: &str) -> Result<MultiplexedLogLine, Multiple
     }
 
     // Find the closing bracket that ends the prefix
-    let closing_bracket_pos = match line.find("] ") {
+    let closing_bracket_pos = match line.find(']') {
         Some(pos) => pos,
         None => {
             return Err(MultiplexedLogLineError::InvalidFormat(
@@ -87,8 +87,13 @@ pub fn parse_multiplexed_line(line: &str) -> Result<MultiplexedLogLine, Multiple
         ));
     }
 
-    // Extract the content (everything after the prefix and space)
-    let content = line[closing_bracket_pos + 2..].to_string();
+    // Extract the content (everything after the closing bracket)
+    let content = if closing_bracket_pos + 1 < line.len() {
+        line[closing_bracket_pos + 1..].to_string()
+    } else {
+        // If there's nothing after the closing bracket, return empty content
+        String::new()
+    };
 
     Ok(MultiplexedLogLine {
         pid,
@@ -102,27 +107,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_multiplexed_line() {
-        // Test 1: Valid line format
-        let test_line = "[PID:12345:stdout] Hello, world!";
+    fn test_valid_line_format() {
+        let test_line = "[PID:12345:stdout]Hello, world!";
         let result = parse_multiplexed_line(test_line).unwrap();
         assert_eq!(result.pid, 12345);
         assert_eq!(result.stream_name, "stdout");
         assert_eq!(result.content, "Hello, world!");
+    }
 
-        // Test 2: Valid line with stderr stream
-        let test_line = "[PID:9876:stderr] Error message";
+    #[test]
+    fn test_valid_line_with_stderr() {
+        let test_line = "[PID:9876:stderr]Error message";
         let result = parse_multiplexed_line(test_line).unwrap();
         assert_eq!(result.pid, 9876);
         assert_eq!(result.stream_name, "stderr");
         assert_eq!(result.content, "Error message");
+    }
 
-        // Test 3: Empty content should be valid
-        let test_line = "[PID:12345:stdout] ";
+    #[test]
+    fn test_empty_content() {
+        let test_line = "[PID:12345:stdout]";
         let result = parse_multiplexed_line(test_line).unwrap();
         assert_eq!(result.content, "");
+    }
 
-        // Test 4: Missing prefix should return error
+    #[test]
+    fn test_missing_prefix() {
         let test_line = "Hello, world!";
         let result = parse_multiplexed_line(test_line);
         assert!(result.is_err());
@@ -132,9 +142,11 @@ mod tests {
             }
             _ => panic!("Expected InvalidFormat error"),
         }
+    }
 
-        // Test 5: Invalid PID format should return error
-        let test_line = "[PID:abc:stdout] Hello, world!";
+    #[test]
+    fn test_invalid_pid_format() {
+        let test_line = "[PID:abc:stdout]Hello, world!";
         let result = parse_multiplexed_line(test_line);
         assert!(result.is_err());
         match result {
@@ -143,8 +155,10 @@ mod tests {
             }
             _ => panic!("Expected PidParseError"),
         }
+    }
 
-        // Test 6: Missing closing bracket should return error
+    #[test]
+    fn test_missing_closing_bracket() {
         let test_line = "[PID:12345:stdout Hello, world!";
         let result = parse_multiplexed_line(test_line);
         assert!(result.is_err());
@@ -154,9 +168,11 @@ mod tests {
             }
             _ => panic!("Expected InvalidFormat error"),
         }
+    }
 
-        // Test 7: Missing stream name should return error
-        let test_line = "[PID:12345:] Hello, world!";
+    #[test]
+    fn test_missing_stream_name() {
+        let test_line = "[PID:12345:]Hello, world!";
         let result = parse_multiplexed_line(test_line);
         assert!(result.is_err());
         match result {
@@ -165,9 +181,11 @@ mod tests {
             }
             _ => panic!("Expected MissingComponent error"),
         }
+    }
 
-        // Test 8: Malformed prefix should return error
-        let test_line = "[PID:12345] Hello, world!";
+    #[test]
+    fn test_malformed_prefix() {
+        let test_line = "[PID:12345]Hello, world!";
         let result = parse_multiplexed_line(test_line);
         assert!(result.is_err());
         match result {

@@ -127,7 +127,7 @@ impl Environment {
         eprintln!(
             "\n{} {} {} {}{} {}\n",
             "✓".green().bold(),
-            "Import environment booted in".white().bold(),
+            "Layer built in".white().bold(),
             elapsed_ms.to_string().yellow().bold(),
             "ms".white().bold(),
             if elapsed_ms > 1000 {
@@ -147,7 +147,7 @@ impl Environment {
         let mut layer = Layer {
             child,
             stdin,
-            reader: lines_iter,
+            reader: Some(lines_iter),
             forked_processes: HashMap::new(),
             result_map: HashMap::new(),
             completion_notifiers: HashMap::new(),
@@ -155,15 +155,8 @@ impl Environment {
             thread_terminate_tx: None,
         };
 
-        // Extract the reader for the monitor thread
-        let stdout = layer.child.stdout.take();
-        if let Some(stdout) = stdout {
-            let reader = BufReader::new(stdout).lines();
-            // Start the monitor thread
-            layer.start_monitor_thread(reader);
-        } else {
-            warn!("Failed to capture stdout for monitor thread");
-        }
+        // Start the monitor thread
+        layer.start_monitor_thread();
 
         self.layer = Some(Arc::new(Mutex::new(layer)));
 
@@ -279,10 +272,22 @@ impl Environment {
             .as_ref()
             .ok_or_else(|| "Environment not initialized. Call boot_main first.".to_string())?;
 
+        // Generate a process UUID
+        let process_uuid = Uuid::new_v4().to_string();
+
         // Send the code to the forked process
         let mut env_guard = environment
             .lock()
             .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+
+        // Initialize an empty result entry for this process before sending the request
+        env_guard.result_map.insert(process_uuid.clone(), None);
+
+        // Create a condition variable for this process
+        let pair = Arc::new((Mutex::new(false), Condvar::new()));
+        env_guard
+            .completion_notifiers
+            .insert(process_uuid.clone(), pair.clone());
 
         let exec_code = format!(
             r#"
@@ -306,58 +311,44 @@ pickled_str = "{}"
             .flush()
             .map_err(|e| format!("Failed to flush child stdin: {}", e))?;
 
-        // Wait for response
-        let mut process_uuid = Uuid::new_v4().to_string();
-        let mut pid: Option<i32> = None;
+        // Release the lock so we don't block other operations
+        drop(env_guard);
 
-        for line in &mut env_guard.reader {
-            let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
+        // Wait on the condition variable
+        let (mutex, condvar) = &*pair;
+        let completed = mutex
+            .lock()
+            .map_err(|e| format!("Failed to lock completion mutex: {:?}", e))?;
 
-            // Try to parse the response as a Message
-            if let Ok(message) = serde_json::from_str::<Message>(&line) {
-                match message {
-                    Message::ForkResponse(response) => {
-                        process_uuid = process_uuid.clone(); // Keep UUID same, but set PID
-                        pid = Some(response.child_pid);
-                        debug!("Fork complete. UUID: {}, PID: {:?}", process_uuid, pid);
-                        break;
-                    }
-                    Message::ChildError(error) => {
-                        error!("Fork error: {}", error.error);
-                        return Err(format!("Fork error: {}", error.error));
-                    }
-                    _ => {
-                        // Log other message types
-                        debug!("Unexpected message: {}", line);
-                    }
-                }
-            } else {
-                // Log any non-message output
-                debug!("Non-message output: {}", line);
+        // If not completed, wait for the signal
+        if !*completed {
+            debug!("Waiting for fork response for process {}...", process_uuid);
+            let _completed = condvar
+                .wait(completed)
+                .map_err(|e| format!("Failed to wait on condvar: {:?}", e))?;
+        }
+
+        // Now that we've been signaled, reacquire the lock and get the result
+        let env_guard = environment
+            .lock()
+            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+
+        // Check the result
+        match env_guard.result_map.get(&process_uuid) {
+            Some(Some(ProcessResult::Complete(_))) => {
+                debug!("Fork completed successfully for process {}", process_uuid);
+                Ok(process_uuid)
+            }
+            Some(Some(ProcessResult::Error(error))) => {
+                error!("Fork error for process {}: {}", process_uuid, error);
+                Err(error.clone())
+            }
+            _ => {
+                // This should not happen if the condition variable was properly signaled
+                warn!("Condition variable was signaled but no result is available");
+                Err("Fork operation failed with unknown error".to_string())
             }
         }
-
-        if process_uuid.is_empty() {
-            return Err("Failed to get process UUID from fork operation".to_string());
-        }
-
-        // Store the PID with its UUID
-        if let Some(pid_val) = pid {
-            env_guard
-                .forked_processes
-                .insert(process_uuid.clone(), pid_val);
-
-            // Initialize an empty result entry for this process
-            env_guard.result_map.insert(process_uuid.clone(), None);
-
-            // Create a condition variable for this process
-            let pair = Arc::new((Mutex::new(false), Condvar::new()));
-            env_guard
-                .completion_notifiers
-                .insert(process_uuid.clone(), pair);
-        }
-
-        Ok(process_uuid)
     }
 
     /// Stop an isolated process by UUID
@@ -713,7 +704,7 @@ mod tests {
 
             // Temporarily replace the environment's child process and reader
             let _original_child = std::mem::replace(&mut env_guard.child, cat_cmd);
-            let _original_reader = std::mem::replace(&mut env_guard.reader, new_reader);
+            let _original_reader = std::mem::replace(&mut env_guard.reader, Some(new_reader));
 
             // Release the lock so we can use communicate_isolated
             drop(env_guard);

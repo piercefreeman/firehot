@@ -148,7 +148,7 @@ fn stop_import_runner(_py: Python, env_id: &str) -> PyResult<()> {
     eprintln!(
         "\n{} {}\n",
         "⏹".yellow().bold(),
-        format!("Stopping import environment {}", env_id)
+        format!("Stopping environment {}", env_id)
             .white()
             .bold()
     );
@@ -159,7 +159,7 @@ fn stop_import_runner(_py: Python, env_id: &str) -> PyResult<()> {
     if let Some(environment) = environments.remove(env_id) {
         // Clean up resources
         environment.stop_main().map_err(|e| {
-            let err_msg = format!("Failed to stop import environment: {}", e);
+            let err_msg = format!("Failed to stop environment: {}", e);
             error!("{}", err_msg);
             PyRuntimeError::new_err(err_msg)
         })?;
@@ -176,7 +176,7 @@ fn stop_import_runner(_py: Python, env_id: &str) -> PyResult<()> {
 
         Ok(())
     } else {
-        let err_msg = format!("No import runner found with ID: {}", env_id);
+        let err_msg = format!("No environment found with ID: {}", env_id);
         error!("{}", err_msg);
 
         // Log the error with owo_colors
