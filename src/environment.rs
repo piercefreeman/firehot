@@ -600,27 +600,6 @@ pickled_str = "{}"
 
         // Check if the process exists
         if !env_guard.forked_processes.contains_key(process_uuid) {
-            // Process might have completed and been removed
-            // Check the message queue for any final messages
-            // This is mostly kept for backward compatibility
-            for process in env_guard.forked_processes.values() {
-                if let Ok(mut queue) = process.message_queue.lock() {
-                    for message in queue.iter() {
-                        match message {
-                            Message::ChildComplete(complete) => {
-                                if complete.result.is_some() {
-                                    return Ok(complete.result.clone());
-                                }
-                            }
-                            Message::ChildError(error) => {
-                                return Err(error.error.clone());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            
             return Err(format!("Process {} does not exist", process_uuid));
         }
 
@@ -642,30 +621,47 @@ pickled_str = "{}"
         
         // Use the condition variable to wait for result
         let (lock, cvar) = &*completion;
-        let mut result = lock.lock()
+        let result = lock.lock()
             .map_err(|e| format!("Failed to lock completion mutex: {:?}", e))?;
         
         // If we don't have a result yet, wait for one
-        if matches!(*result, ProcessResult::None) {
-            debug!("Waiting for result from process {}", process_uuid);
-            
-            // Wait with timeout
-            let wait_result = cvar.wait_timeout(result, timeout)
-                .map_err(|e| format!("Failed to wait on condition variable: {:?}", e))?;
+        match *result {
+            ProcessResult::None => {
+                debug!("Waiting for result from process {}", process_uuid);
                 
-            if wait_result.1.timed_out() {
-                return Err(format!("Timeout waiting for process {} to complete", process_uuid));
+                // Wait with timeout - we need to drop result and get a new one after wait_timeout
+                let (new_result, timeout_result) = cvar.wait_timeout(result, timeout)
+                    .map_err(|e| format!("Failed to wait on condition variable: {:?}", e))?;
+                
+                if timeout_result.timed_out() {
+                    return Err(format!("Timeout waiting for process {} to complete", process_uuid));
+                }
+                
+                // Process the result with the new guard
+                match &*new_result {
+                    ProcessResult::Success(result_opt) => {
+                        trace!(
+                            "Received success result from {}: {:?}",
+                            process_name,
+                            result_opt
+                        );
+                        Ok(result_opt.clone())
+                    }
+                    ProcessResult::Error(error) => {
+                        error!(
+                            "Received error from {}: {}",
+                            process_name, error
+                        );
+                        Err(error.clone())
+                    }
+                    ProcessResult::None => {
+                        // This should not happen after waiting, but just in case
+                        warn!("No result available after waiting for process {}", process_uuid);
+                        Ok(None)
+                    }
+                }
             }
-            
-            // Here, result has been updated by the condition variable wait
-            debug!("Received result notification for process {}", process_uuid);
-        } else {
-            debug!("Process {} already has a result", process_uuid);
-        }
-
-        // Process the result
-        match &*result {
-            ProcessResult::Success(result_opt) => {
+            ProcessResult::Success(ref result_opt) => {
                 trace!(
                     "Received success result from {}: {:?}",
                     process_name,
@@ -673,17 +669,12 @@ pickled_str = "{}"
                 );
                 Ok(result_opt.clone())
             }
-            ProcessResult::Error(error) => {
+            ProcessResult::Error(ref error) => {
                 error!(
                     "Received error from {}: {}",
                     process_name, error
                 );
                 Err(error.clone())
-            }
-            ProcessResult::None => {
-                // This should not happen after waiting, but just in case
-                warn!("No result available after waiting for process {}", process_uuid);
-                Ok(None)
             }
         }
     }
@@ -751,7 +742,7 @@ pickled_str = "{}"
                     match serde_json::from_str::<Message>(&line) {
                         Ok(message) => {
                             match message {
-                                Message::ChildComplete(complete) => {
+                                Message::ChildComplete(ref complete) => {
                                     debug!(
                                         "Process {} ({}) completed successfully",
                                         process_name, process_uuid
@@ -798,7 +789,7 @@ pickled_str = "{}"
                                     // Exit the monitoring thread
                                     break;
                                 },
-                                Message::ChildError(error) => {
+                                Message::ChildError(ref error) => {
                                     debug!(
                                         "Process {} ({}) failed with error: {}",
                                         process_name, process_uuid, error.error
@@ -890,7 +881,7 @@ pickled_str = "{}"
             }
 
             // Small sleep to prevent CPU spinning
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            //std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
         debug!(
