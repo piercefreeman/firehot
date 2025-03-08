@@ -13,6 +13,7 @@ use uuid::Uuid;
 pub mod ast;
 pub mod environment;
 pub mod harness;
+pub mod layer;
 pub mod messages;
 pub mod multiplex_logs;
 pub mod scripts;
