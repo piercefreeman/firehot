@@ -182,9 +182,9 @@ fn stop_import_runner(_py: Python, runner_id: &str) -> PyResult<()> {
 fn exec_isolated<'py>(
     py: Python<'py>,
     runner_id: &str,
+    name: &str,
     func: PyObject,
     args: Option<PyObject>,
-    name: &str,
 ) -> PyResult<&'py PyAny> {
     debug!(
         "Executing function in isolated process for runner: {}",

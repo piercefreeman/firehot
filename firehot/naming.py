@@ -1,6 +1,5 @@
 import random
 
-
 ADJECTIVES: list[str] = [
     "bright",
     "colorful",
@@ -31,7 +30,7 @@ ADJECTIVES: list[str] = [
     "calm",
     "elegant",
     "golden",
-    "humble"
+    "humble",
 ]
 
 NOUNS: list[str] = [
@@ -64,8 +63,9 @@ NOUNS: list[str] = [
     "desert",
     "harbor",
     "lighthouse",
-    "canyon"
+    "canyon",
 ]
+
 
 class NameManager:
     def __init__(self, separator: str = "-"):
@@ -84,7 +84,7 @@ class NameManager:
         while True:
             random_adjective = random.choice(ADJECTIVES)
             random_noun = random.choice(NOUNS)
-            
+
             proposed_name = f"{random_adjective}{self.separator}{random_noun}"
 
             if proposed_name in self.reserved_names:
@@ -100,6 +100,7 @@ class NameManager:
 
         """
         self.reserved_names.remove(name)
+
 
 # Singleton instance
 NAME_REGISTRY = NameManager()

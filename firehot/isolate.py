@@ -38,7 +38,7 @@ class ImportRunner:
 
         """
         name = name or NAME_REGISTRY.reserve_random_name()
-        return UUID(exec_isolated_rs(self.runner_id, func, args if args else None, name))
+        return UUID(exec_isolated_rs(self.runner_id, name, func, args if args else None))
 
     def communicate_isolated(self, process_uuid: UUID) -> str:
         """
