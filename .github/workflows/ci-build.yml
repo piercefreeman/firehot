@@ -64,6 +64,8 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Run Cargo tests
+        env:
+          FIREHOT_LOG_LEVEL: trace
         run: cargo test --lib --all
 
   # Build maturin packages for each target OS

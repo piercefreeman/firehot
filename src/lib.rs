@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 pub mod ast;
 pub mod environment;
+pub mod harness;
 pub mod messages;
 pub mod scripts;
 
@@ -26,6 +27,9 @@ static IMPORT_RUNNERS: Lazy<Mutex<HashMap<String, environment::ImportRunner>>> =
 /// Python module for hot reloading with isolated imports
 #[pymodule]
 fn firehot(_py: Python, m: &PyModule) -> PyResult<()> {
+    // No need to register the custom exception
+    // m.add("ChildException", _py.get_type::<ChildException>())?;
+
     // Initialize the logger using Builder API
     let mut builder = env_logger::Builder::from_default_env();
 
@@ -262,8 +266,9 @@ fn communicate_isolated(
     let runners = IMPORT_RUNNERS.lock().unwrap();
     if let Some(runner) = runners.get(runner_id) {
         runner.communicate_isolated(process_uuid).map_err(|e| {
-            let err_msg = format!("Failed to communicate with isolated process: {}", e);
+            let err_msg = format!("Child process error: {}", e);
             error!("{}", err_msg);
+            // Use the standard PyRuntimeError instead of custom exception
             PyRuntimeError::new_err(err_msg)
         })
     } else {

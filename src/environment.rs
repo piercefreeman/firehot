@@ -2,7 +2,7 @@ use anstream::eprintln;
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, trace, warn};
 use owo_colors::OwoColorize;
-use serde_json;
+use serde_json::{self};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -434,7 +434,12 @@ pickled_str = "{}"
                     }
                     Message::ChildError(error) => {
                         error!("Received function error: {:?}", error);
-                        return Err(error.error);
+                        // Format the error with traceback information if available
+                        let error_message = match error.traceback {
+                            Some(traceback) => format!("{}\n\n{}", error.error, traceback),
+                            None => error.error,
+                        };
+                        return Err(error_message);
                     }
                     _ => {
                         trace!("Received other message type: {:?}", message);
@@ -483,13 +488,11 @@ mod tests {
     use super::*;
 
     use crate::messages::ChildComplete;
-    use crate::scripts::PYTHON_LOADER_SCRIPT;
+    use tempfile::TempDir;
+
     use std::fs::File;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::process::{Command, Stdio};
-
-    use tempfile::TempDir;
 
     // Helper function to create a temporary Python file
     fn create_temp_py_file(dir: &TempDir, filename: &str, content: &str) -> PathBuf {
@@ -497,50 +500,6 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file_path
-    }
-
-    // Helper to create a mock ImportRunner with basic functionality
-    fn create_mock_import_runner(project_dir: &str) -> Result<ImportRunner, String> {
-        // Create a minimal Python process that can handle basic messages
-        let mut python_cmd = Command::new("python")
-            .args(["-c", PYTHON_LOADER_SCRIPT])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn Python process: {}", e))?;
-
-        let stdin = python_cmd
-            .stdin
-            .take()
-            .ok_or_else(|| "Failed to capture stdin".to_string())?;
-
-        let stdout = python_cmd
-            .stdout
-            .take()
-            .ok_or_else(|| "Failed to capture stdout".to_string())?;
-
-        let reader = BufReader::new(stdout).lines();
-
-        // Create the environment
-        let environment = Environment {
-            child: python_cmd,
-            stdin,
-            reader,
-            forked_processes: HashMap::new(),
-        };
-
-        // Use a default package name for tests
-        let ast_manager = ProjectAstManager::new("test_package", project_dir);
-
-        let runner = ImportRunner {
-            id: Uuid::new_v4().to_string(),
-            environment: Some(Arc::new(Mutex::new(environment))),
-            ast_manager,
-            first_scan: false,
-        };
-
-        Ok(runner)
     }
 
     #[test]
@@ -551,15 +510,11 @@ mod tests {
         // Create a simple Python project
         create_temp_py_file(&temp_dir, "main.py", "print('Hello, world!')");
 
-        let runner_result = create_mock_import_runner(dir_path);
-        assert!(
-            runner_result.is_ok(),
-            "Failed to create ImportRunner: {:?}",
-            runner_result.err()
-        );
-
-        let runner = runner_result.unwrap();
+        let mut runner = ImportRunner::new("test_package", dir_path);
         assert_eq!(runner.ast_manager.get_project_path(), dir_path);
+
+        // Boot the environment before checking it
+        runner.boot_main().expect("Failed to boot main environment");
 
         // Check that the environment exists and has an empty forked_processes map
         assert!(runner.environment.is_some());
@@ -581,10 +536,10 @@ mod tests {
         // Create a simple Python project with initial imports
         create_temp_py_file(&temp_dir, "main.py", "import os\nimport sys");
 
-        let runner_result = create_mock_import_runner(dir_path);
-        assert!(runner_result.is_ok());
+        let mut runner = ImportRunner::new("test_package", dir_path);
 
-        let mut runner = runner_result.unwrap();
+        // Boot the environment before accessing it
+        runner.boot_main().expect("Failed to boot main environment");
 
         // Force first_scan to true to allow update_environment to work
         runner.first_scan = true;
@@ -680,10 +635,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
-        let runner_result = create_mock_import_runner(dir_path);
-        assert!(runner_result.is_ok());
+        let mut runner = ImportRunner::new("test_package", dir_path);
 
-        let runner = runner_result.unwrap();
+        // Boot the environment before accessing it
+        runner.boot_main().expect("Failed to boot main environment");
 
         // Set up a mock test process
         {
@@ -770,10 +725,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
-        let runner_result = create_mock_import_runner(dir_path);
-        assert!(runner_result.is_ok());
+        let mut runner = ImportRunner::new("test_package", dir_path);
 
-        let runner = runner_result.unwrap();
+        // Boot the environment before accessing it
+        runner.boot_main().expect("Failed to boot main environment");
 
         // Create a test process UUID
         let env = runner.environment.as_ref().unwrap();
@@ -852,19 +807,79 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
-        let runner_result = create_mock_import_runner(dir_path);
-        assert!(runner_result.is_ok());
+        let mut runner = ImportRunner::new("test_package", dir_path);
 
-        let runner = runner_result.unwrap();
+        // Boot the environment before stopping it
+        runner.boot_main().expect("Failed to boot main environment");
 
         // This should stop the main Python process
         let result = runner.stop_main();
         assert!(result.is_ok());
-
-        // Verify that the function returns true since the environment is properly initialized
         assert!(
             result.unwrap(),
             "stop_main should return true after successful execution"
         );
+    }
+
+    #[test]
+    fn test_python_value_error_handling() -> Result<(), String> {
+        // Create a temporary directory for our test
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path().to_str().unwrap();
+
+        // Create a Python script that raises a ValueError with more context for traceback
+        let python_script = r#"
+def function_that_raises_error():
+    # This will raise a ValueError with a meaningful message
+    raise ValueError("This is a custom error message for testing")
+
+def main():
+    # Call the function that raises an error to generate a traceback
+    return function_that_raises_error()
+        "#;
+
+        // Prepare the script for isolation
+        let (pickled_data, _python_env) =
+            crate::harness::prepare_script_for_isolation(python_script, "main")?;
+
+        // Create and boot the ImportRunner
+        let mut runner = ImportRunner::new("test_package", dir_path);
+        runner.boot_main()?;
+
+        // Execute the script in isolation - this should not fail at this point
+        let process_uuid = runner.exec_isolated(&pickled_data)?;
+
+        // Wait a moment for the process to execute and fail
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Communicate with the isolated process to get the result
+        // This should contain the error
+        let result = runner.communicate_isolated(&process_uuid);
+
+        // Verify that we got an error
+        assert!(result.is_err(), "Expected an error but got: {:?}", result);
+
+        // Get the error message
+        let error_message = result.err().unwrap();
+
+        // The error should contain the specific error message
+        assert!(
+            error_message.contains("This is a custom error message"),
+            "Error should contain the custom error message but got: {}",
+            error_message
+        );
+
+        // The error should contain traceback information
+        assert!(
+            error_message.contains("Traceback")
+                || error_message.contains("function_that_raises_error"),
+            "Error should contain traceback information but got: {}",
+            error_message
+        );
+
+        // Clean up
+        runner.stop_isolated(&process_uuid)?;
+
+        Ok(())
     }
 }
