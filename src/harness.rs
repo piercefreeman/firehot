@@ -1,17 +1,17 @@
 /*
  * Utilities
  */
- 
- use anyhow::Result;
- use log::{debug, info};
- 
- use serde_json::{self, json};
- use std::process::{Command, Stdio};
- use uuid::Uuid;
- use std::fs;
- use tempfile::TempDir;
- 
- use std::env;
+
+use anyhow::Result;
+use log::{debug, info};
+
+use serde_json::{self, json};
+use std::fs;
+use std::process::{Command, Stdio};
+use tempfile::TempDir;
+use uuid::Uuid;
+
+use std::env;
 
 /// Python env guard that restores the original PYTHONPATH when dropped
 pub struct PythonPathGuard {
@@ -24,10 +24,12 @@ pub struct PythonPathGuard {
 impl PythonPathGuard {
     fn new(module_name: String, temp_dir: TempDir) -> Self {
         // Get the path from temp_dir
-        let container_path = temp_dir.path().to_str()
+        let container_path = temp_dir
+            .path()
+            .to_str()
             .expect("Failed to convert temp dir path to string")
             .to_string();
-        
+
         // Add the new path to PYTHONPATH
         if let Some(current_path) = env::var_os("PYTHONPATH") {
             // If PYTHONPATH already exists, append the temp dir
@@ -40,8 +42,12 @@ impl PythonPathGuard {
             // If PYTHONPATH doesn't exist, create it with just the temp dir
             env::set_var("PYTHONPATH", &container_path);
         }
-        
-        Self { module_name, container_path, _temp_dir: temp_dir }
+
+        Self {
+            module_name,
+            container_path,
+            _temp_dir: temp_dir,
+        }
     }
 }
 
@@ -51,16 +57,16 @@ impl Drop for PythonPathGuard {
         if let Some(current_path) = env::var_os("PYTHONPATH") {
             let current_path_str = current_path.to_str().unwrap_or("");
             let path_separator = if cfg!(windows) { ";" } else { ":" };
-            
+
             // Split the current path into components
             let mut components: Vec<&str> = current_path_str.split(path_separator).collect();
-            
+
             // Remove our specific directory from the components
             components.retain(|&component| component != self.container_path);
-            
+
             // Rejoin the components to form the new path
             let new_path = components.join(path_separator);
-            
+
             // If there are still components left, set the new path
             // Otherwise, remove the PYTHONPATH variable
             if !new_path.is_empty() {
@@ -99,12 +105,11 @@ pub fn prepare_script_for_isolation(
 
     // Create a valid Python module name (no dashes, start with letter)
     let module_name = format!("pymodule{}", Uuid::new_v4().to_string().replace("-", ""));
-    
+
     // Create the module directory inside the temp directory
     let module_dir = temp_dir.path().join(&module_name);
-    fs::create_dir(&module_dir)
-        .map_err(|e| format!("Failed to create module directory: {}", e))?;
-    
+    fs::create_dir(&module_dir).map_err(|e| format!("Failed to create module directory: {}", e))?;
+
     // Create __init__.py inside the module directory to make it a proper package
     let init_path = module_dir.join("__init__.py");
     fs::write(&init_path, "# Package initialization")
@@ -194,4 +199,86 @@ print(pickled_data)
     // Return both the pickled output and the PythonPathGuard which now owns the temp_dir
     info!("Successfully prepared script for isolation");
     Ok((pickled_output, python_path_guard))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::environment::ImportRunner;
+    use base64;
+    use base64::Engine;
+
+    #[test]
+    fn test_prepare_script_for_isolation() -> Result<(), String> {
+        // Create a sample Python script
+        let python_script = r#"
+def greet(name):
+    return f"Hello, {name}!"
+
+def main():
+    result = greet("World")
+    print(result)
+    return result
+        "#;
+
+        // Prepare the script for isolation
+        let (pickled_data, _python_env) = prepare_script_for_isolation(python_script, "main")?;
+
+        // Verify that we got some pickled data back
+        assert!(!pickled_data.is_empty());
+        assert!(pickled_data.len() > 20); // A reasonable base64 string length
+
+        // Verify the pickled data is valid base64
+        let _decoded = base64::engine::general_purpose::STANDARD
+            .decode(pickled_data)
+            .map_err(|e| format!("Invalid base64: {}", e))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_prepare_and_exec_isolation() -> Result<(), String> {
+        // Create a sample Python script
+        let python_script = r#"
+def greet(name):
+    return f"Hello, {name}!"
+
+def main():
+    result = greet("World")
+    return result
+        "#;
+
+        // Prepare the script for isolation
+        // Keep the temp_dir in scope until the end of the test
+        let (pickled_data, python_env) = prepare_script_for_isolation(python_script, "main")?;
+
+        // Create a mock ImportRunner
+        let mut runner = ImportRunner::new("test_package", &python_env.container_path);
+
+        // Boot the environment
+        runner.boot_main()?;
+
+        // Execute the script in isolation
+        let process_uuid = runner.exec_isolated(&pickled_data)?;
+
+        // Verify the result - should be a valid UUID string
+        assert!(!process_uuid.is_empty());
+
+        // Wait for a moment to let the isolated process execute
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Communicate with the isolated process to get the result
+        let process_result = runner.communicate_isolated(&process_uuid)?;
+
+        // The result should be "Hello, World!"
+        assert_eq!(process_result, Some("Hello, World!".to_string()));
+
+        // Stop the isolated process
+        runner.stop_isolated(&process_uuid)?;
+
+        // Stop the main environment
+        runner.stop_main()?;
+
+        Ok(())
+    }
 }

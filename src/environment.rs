@@ -17,8 +17,6 @@ use crate::ast::ProjectAstManager;
 use crate::messages::{ExitRequest, ForkRequest, Message};
 use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
 
-
-
 /// Runtime environment for executing Python code
 pub struct Environment {
     pub child: Child,                    // The forkable process with all imports loaded
@@ -483,17 +481,13 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64;
-    use base64::Engine;
+
+    use crate::messages::ChildComplete;
     use tempfile::TempDir;
 
-    use crate::harness::prepare_script_for_isolation;
-    use crate::messages::ChildComplete;
-    use crate::scripts::PYTHON_LOADER_SCRIPT;
     use std::fs::File;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::process::{Command, Stdio};
 
     // Helper function to create a temporary Python file
     fn create_temp_py_file(dir: &TempDir, filename: &str, content: &str) -> PathBuf {
@@ -501,50 +495,6 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file_path
-    }
-
-    // Helper to create a mock ImportRunner with basic functionality
-    fn create_mock_import_runner(project_dir: &str) -> Result<ImportRunner, String> {
-        // Create a minimal Python process that can handle basic messages
-        let mut python_cmd = Command::new("python")
-            .args(["-c", PYTHON_LOADER_SCRIPT])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn Python process: {}", e))?;
-
-        let stdin = python_cmd
-            .stdin
-            .take()
-            .ok_or_else(|| "Failed to capture stdin".to_string())?;
-
-        let stdout = python_cmd
-            .stdout
-            .take()
-            .ok_or_else(|| "Failed to capture stdout".to_string())?;
-
-        let reader = BufReader::new(stdout).lines();
-
-        // Create the environment
-        let environment = Environment {
-            child: python_cmd,
-            stdin,
-            reader,
-            forked_processes: HashMap::new(),
-        };
-
-        // Use a default package name for tests
-        let ast_manager = ProjectAstManager::new("test_package", project_dir);
-
-        let runner = ImportRunner {
-            id: Uuid::new_v4().to_string(),
-            environment: Some(Arc::new(Mutex::new(environment))),
-            ast_manager,
-            first_scan: false,
-        };
-
-        Ok(runner)
     }
 
     #[test]
@@ -555,15 +505,11 @@ mod tests {
         // Create a simple Python project
         create_temp_py_file(&temp_dir, "main.py", "print('Hello, world!')");
 
-        let runner_result = create_mock_import_runner(dir_path);
-        assert!(
-            runner_result.is_ok(),
-            "Failed to create ImportRunner: {:?}",
-            runner_result.err()
-        );
-
-        let runner = runner_result.unwrap();
+        let mut runner = ImportRunner::new("test_package", dir_path);
         assert_eq!(runner.ast_manager.get_project_path(), dir_path);
+
+        // Boot the environment before checking it
+        runner.boot_main().expect("Failed to boot main environment");
 
         // Check that the environment exists and has an empty forked_processes map
         assert!(runner.environment.is_some());
@@ -585,10 +531,10 @@ mod tests {
         // Create a simple Python project with initial imports
         create_temp_py_file(&temp_dir, "main.py", "import os\nimport sys");
 
-        let runner_result = create_mock_import_runner(dir_path);
-        assert!(runner_result.is_ok());
+        let mut runner = ImportRunner::new("test_package", dir_path);
 
-        let mut runner = runner_result.unwrap();
+        // Boot the environment before accessing it
+        runner.boot_main().expect("Failed to boot main environment");
 
         // Force first_scan to true to allow update_environment to work
         runner.first_scan = true;
@@ -684,10 +630,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
-        let runner_result = create_mock_import_runner(dir_path);
-        assert!(runner_result.is_ok());
+        let mut runner = ImportRunner::new("test_package", dir_path);
 
-        let runner = runner_result.unwrap();
+        // Boot the environment before accessing it
+        runner.boot_main().expect("Failed to boot main environment");
 
         // Set up a mock test process
         {
@@ -774,10 +720,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
-        let runner_result = create_mock_import_runner(dir_path);
-        assert!(runner_result.is_ok());
+        let mut runner = ImportRunner::new("test_package", dir_path);
 
-        let runner = runner_result.unwrap();
+        // Boot the environment before accessing it
+        runner.boot_main().expect("Failed to boot main environment");
 
         // Create a test process UUID
         let env = runner.environment.as_ref().unwrap();
@@ -856,10 +802,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
-        let runner_result = create_mock_import_runner(dir_path);
-        assert!(runner_result.is_ok());
+        let mut runner = ImportRunner::new("test_package", dir_path);
 
-        let runner = runner_result.unwrap();
+        // Boot the environment before stopping it
+        runner.boot_main().expect("Failed to boot main environment");
 
         // This should stop the main Python process
         let result = runner.stop_main();
@@ -870,79 +816,5 @@ mod tests {
             result.unwrap(),
             "stop_main should return true after successful execution"
         );
-    }
-
-    #[test]
-    fn test_prepare_script_for_isolation() -> Result<(), String> {
-        // Create a sample Python script
-        let python_script = r#"
-def greet(name):
-    return f"Hello, {name}!"
-
-def main():
-    result = greet("World")
-    print(result)
-    return result
-        "#;
-
-        // Prepare the script for isolation
-        let (pickled_data, _python_env) = prepare_script_for_isolation(python_script, "main")?;
-
-        // Verify that we got some pickled data back
-        assert!(!pickled_data.is_empty());
-        assert!(pickled_data.len() > 20); // A reasonable base64 string length
-
-        // Verify the pickled data is valid base64
-        let _decoded = base64::engine::general_purpose::STANDARD
-            .decode(pickled_data)
-            .map_err(|e| format!("Invalid base64: {}", e))?;
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_prepare_and_exec_isolation() -> Result<(), String> {
-        // Create a sample Python script
-        let python_script = r#"
-def greet(name):
-    return f"Hello, {name}!"
-
-def main():
-    result = greet("World")
-    return result
-        "#;
-
-        // Prepare the script for isolation
-        // Keep the temp_dir in scope until the end of the test
-        let (pickled_data, python_env) = prepare_script_for_isolation(python_script, "main")?;
-
-        // Create a mock ImportRunner
-        let mut runner = create_mock_import_runner(&python_env.container_path)?;
-
-        // Boot the environment
-        runner.boot_main()?;
-
-        // Execute the script in isolation
-        let process_uuid = runner.exec_isolated(&pickled_data)?;
-
-        // Verify the result - should be a valid UUID string
-        assert!(!process_uuid.is_empty());
-
-        // Wait for a moment to let the isolated process execute
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Communicate with the isolated process to get the result
-        let process_result = runner.communicate_isolated(&process_uuid)?;
-
-        // The result should be "Hello, World!"
-        assert_eq!(process_result, Some("Hello, World!".to_string()));
-
-        // Stop the isolated process
-        runner.stop_isolated(&process_uuid)?;
-
-        // Stop the main environment
-        runner.stop_main()?;
-
-        Ok(())
     }
 }
