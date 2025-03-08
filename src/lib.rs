@@ -22,7 +22,7 @@ pub use messages::{ExitRequest, ForkRequest, Message};
 use scripts::PYTHON_CALL_SCRIPT;
 
 // Replace RUNNERS and other new collections with IMPORT_RUNNERS
-static IMPORT_RUNNERS: Lazy<Mutex<HashMap<String, environment::ImportRunner>>> =
+static ENVIRONMENTS: Lazy<Mutex<HashMap<String, environment::Environment>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Python module for hot reloading with isolated imports
@@ -83,7 +83,7 @@ fn firehot(_py: Python, m: &PyModule) -> PyResult<()> {
 #[pyfunction]
 fn start_import_runner(_py: Python, project_name: &str, package_path: &str) -> PyResult<String> {
     // Generate a unique ID for this runner
-    let runner_id = Uuid::new_v4().to_string();
+    let env_id = Uuid::new_v4().to_string();
 
     // Beautiful logging for starting the import runner
     eprintln!(
@@ -94,8 +94,8 @@ fn start_import_runner(_py: Python, project_name: &str, package_path: &str) -> P
     );
 
     // Create the runner object
-    info!("Creating environment with ID: {}", runner_id);
-    let mut runner = environment::ImportRunner::new(project_name, package_path);
+    info!("Creating environment with ID: {}", env_id);
+    let mut runner = environment::Environment::new(project_name, package_path);
 
     runner.boot_main().map_err(|e| {
         error!("Failed to boot main: {}", e);
@@ -103,35 +103,35 @@ fn start_import_runner(_py: Python, project_name: &str, package_path: &str) -> P
     })?;
 
     // Store in global registry
-    let mut runners = IMPORT_RUNNERS.lock().unwrap();
-    runners.insert(runner_id.clone(), runner);
+    let mut environments = ENVIRONMENTS.lock().unwrap();
+    environments.insert(env_id.clone(), runner);
 
-    Ok(runner_id)
+    Ok(env_id)
 }
 
 /// Update the environment by checking for import changes and restarting if necessary
 #[pyfunction]
-fn update_environment(_py: Python, runner_id: &str) -> PyResult<bool> {
+fn update_environment(_py: Python, env_id: &str) -> PyResult<bool> {
     // Get the ImportRunner
-    info!("Updating environment for runner: {}", runner_id);
-    let mut runners = IMPORT_RUNNERS.lock().unwrap();
-    let runner = runners.get_mut(runner_id).ok_or_else(|| {
-        let err_msg = format!("No import runner found with ID: {}", runner_id);
+    info!("Updating environment for runner: {}", env_id);
+    let mut environments = ENVIRONMENTS.lock().unwrap();
+    let environment = environments.get_mut(env_id).ok_or_else(|| {
+        let err_msg = format!("No import runner found with ID: {}", env_id);
         error!("{}", err_msg);
         PyRuntimeError::new_err(err_msg)
     })?;
 
     // Update the environment using the runner's method
-    let updated = runner.update_environment().map_err(|e| {
+    let updated = environment.update_environment().map_err(|e| {
         let err_msg = format!("Failed to update environment: {}", e);
         error!("{}", err_msg);
         PyRuntimeError::new_err(err_msg)
     })?;
 
     if updated {
-        info!("Environment updated successfully for runner: {}", runner_id);
+        info!("Environment updated successfully for environment: {}", env_id);
     } else {
-        debug!("No environment updates needed for runner: {}", runner_id);
+        debug!("No environment updates needed for environment: {}", env_id);
     }
 
     Ok(updated)
@@ -139,23 +139,23 @@ fn update_environment(_py: Python, runner_id: &str) -> PyResult<bool> {
 
 /// Stop the import runner with the given ID
 #[pyfunction]
-fn stop_import_runner(_py: Python, runner_id: &str) -> PyResult<()> {
+fn stop_import_runner(_py: Python, env_id: &str) -> PyResult<()> {
     // Beautiful logging for stopping the import runner
     eprintln!(
         "\n{} {}\n",
         "⏹".yellow().bold(),
-        format!("Stopping import environment {}", runner_id)
+        format!("Stopping import environment {}", env_id)
             .white()
             .bold()
     );
 
     let start_time = Instant::now();
 
-    let mut runners = IMPORT_RUNNERS.lock().unwrap();
-    if let Some(runner) = runners.remove(runner_id) {
+    let mut environments = ENVIRONMENTS.lock().unwrap();
+    if let Some(environment) = environments.remove(env_id) {
         // Clean up resources
-        runner.stop_main().map_err(|e| {
-            let err_msg = format!("Failed to stop import runner: {}", e);
+        environment.stop_main().map_err(|e| {
+            let err_msg = format!("Failed to stop import environment: {}", e);
             error!("{}", err_msg);
             PyRuntimeError::new_err(err_msg)
         })?;
@@ -172,7 +172,7 @@ fn stop_import_runner(_py: Python, runner_id: &str) -> PyResult<()> {
 
         Ok(())
     } else {
-        let err_msg = format!("No import runner found with ID: {}", runner_id);
+        let err_msg = format!("No import runner found with ID: {}", env_id);
         error!("{}", err_msg);
 
         // Log the error with owo_colors
@@ -186,13 +186,13 @@ fn stop_import_runner(_py: Python, runner_id: &str) -> PyResult<()> {
 #[pyfunction]
 fn exec_isolated<'py>(
     py: Python<'py>,
-    runner_id: &str,
+    env_id: &str,
     func: PyObject,
     args: Option<PyObject>,
 ) -> PyResult<&'py PyAny> {
     debug!(
         "Executing function in isolated process for runner: {}",
-        runner_id
+        env_id
     );
 
     // Create a dict to hold our function and args for pickling
@@ -212,10 +212,10 @@ fn exec_isolated<'py>(
         })?
         .extract::<String>()?;
 
-    let runners = IMPORT_RUNNERS.lock().unwrap();
-    if let Some(runner) = runners.get(runner_id) {
+    let environments = ENVIRONMENTS.lock().unwrap();
+    if let Some(environment) = environments.get(env_id) {
         // Convert Rust Result<String, String> to PyResult
-        match runner.exec_isolated(&pickled_data) {
+        match environment.exec_isolated(&pickled_data) {
             Ok(result) => {
                 debug!("Function executed successfully in isolated process");
                 Ok(py.eval(&format!("'{}'", result), None, None)?)
@@ -226,7 +226,7 @@ fn exec_isolated<'py>(
             }
         }
     } else {
-        let err_msg = format!("No import runner found with ID: {}", runner_id);
+        let err_msg = format!("No import runner found with ID: {}", env_id);
         error!("{}", err_msg);
         Err(PyRuntimeError::new_err(err_msg))
     }
@@ -234,20 +234,20 @@ fn exec_isolated<'py>(
 
 /// Stop an isolated process
 #[pyfunction]
-fn stop_isolated(_py: Python, runner_id: &str, process_uuid: &str) -> PyResult<bool> {
+fn stop_isolated(_py: Python, env_id: &str, process_uuid: &str) -> PyResult<bool> {
     info!(
         "Stopping isolated process {} for runner {}",
-        process_uuid, runner_id
+        process_uuid, env_id
     );
-    let runners = IMPORT_RUNNERS.lock().unwrap();
-    if let Some(runner) = runners.get(runner_id) {
-        runner.stop_isolated(process_uuid).map_err(|e| {
+    let environments = ENVIRONMENTS.lock().unwrap();
+    if let Some(environment) = environments.get(env_id) {
+        environment.stop_isolated(process_uuid).map_err(|e| {
             let err_msg = format!("Failed to stop isolated process: {}", e);
             error!("{}", err_msg);
             PyRuntimeError::new_err(err_msg)
         })
     } else {
-        let err_msg = format!("No import runner found with ID: {}", runner_id);
+        let err_msg = format!("No import environment found with ID: {}", env_id);
         error!("{}", err_msg);
         Err(PyRuntimeError::new_err(err_msg))
     }
@@ -257,23 +257,23 @@ fn stop_isolated(_py: Python, runner_id: &str, process_uuid: &str) -> PyResult<b
 #[pyfunction]
 fn communicate_isolated(
     _py: Python,
-    runner_id: &str,
+    env_id: &str,
     process_uuid: &str,
 ) -> PyResult<Option<String>> {
     debug!(
-        "Communicating with isolated process {} for runner {}",
-        process_uuid, runner_id
+        "Communicating with isolated process {} for environment {}",
+        process_uuid, env_id
     );
-    let runners = IMPORT_RUNNERS.lock().unwrap();
-    if let Some(runner) = runners.get(runner_id) {
-        runner.communicate_isolated(process_uuid).map_err(|e| {
+    let environments = ENVIRONMENTS.lock().unwrap();
+    if let Some(environment) = environments.get(env_id) {
+        environment.communicate_isolated(process_uuid).map_err(|e| {
             let err_msg = format!("Child process error: {}", e);
             error!("{}", err_msg);
             // Use the standard PyRuntimeError instead of custom exception
             PyRuntimeError::new_err(err_msg)
         })
     } else {
-        let err_msg = format!("No import runner found with ID: {}", runner_id);
+        let err_msg = format!("No import environment found with ID: {}", env_id);
         error!("{}", err_msg);
         Err(PyRuntimeError::new_err(err_msg))
     }

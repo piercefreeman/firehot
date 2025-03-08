@@ -204,7 +204,7 @@ print(pickled_data)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::environment::ImportRunner;
+    use crate::environment::Environment;
     use base64;
     use base64::Engine;
 
@@ -253,7 +253,7 @@ def main():
         let (pickled_data, python_env) = prepare_script_for_isolation(python_script, "main")?;
 
         // Create a mock ImportRunner
-        let mut runner = ImportRunner::new("test_package", &python_env.container_path);
+        let mut runner = Environment::new("test_package", &python_env.container_path);
 
         // Boot the environment
         runner.boot_main()?;

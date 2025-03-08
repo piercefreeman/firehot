@@ -45,7 +45,7 @@ pub struct Layer {
 }
 
 /// Runner for isolated Python code execution
-pub struct ImportRunner {
+pub struct Environment {
     pub id: String,
     pub layer: Option<Arc<Mutex<Layer>>>, // The current layer that is tied to this environment
     pub ast_manager: ProjectAstManager, // Project AST manager for this environment
@@ -53,7 +53,7 @@ pub struct ImportRunner {
     first_scan: bool,
 }
 
-impl ImportRunner {
+impl Environment {
     pub fn new(project_name: &str, project_path: &str) -> Self {
         // Create a new AST manager for this project
         let ast_manager = ProjectAstManager::new(project_name, project_path);
@@ -674,7 +674,7 @@ mod tests {
         // Create a simple Python project
         create_temp_py_file(&temp_dir, "main.py", "print('Hello, world!')");
 
-        let mut runner = ImportRunner::new("test_package", dir_path);
+        let mut runner = Environment::new("test_package", dir_path);
         assert_eq!(runner.ast_manager.get_project_path(), dir_path);
 
         // Boot the environment before checking it
@@ -700,7 +700,7 @@ mod tests {
         // Create a simple Python project with initial imports
         create_temp_py_file(&temp_dir, "main.py", "import os\nimport sys");
 
-        let mut runner = ImportRunner::new("test_package", dir_path);
+        let mut runner = Environment::new("test_package", dir_path);
 
         // Boot the environment before accessing it
         runner.boot_main().expect("Failed to boot main environment");
@@ -799,7 +799,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
-        let mut runner = ImportRunner::new("test_package", dir_path);
+        let mut runner = Environment::new("test_package", dir_path);
 
         // Boot the environment before accessing it
         runner.boot_main().expect("Failed to boot main environment");
@@ -889,7 +889,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
-        let mut runner = ImportRunner::new("test_package", dir_path);
+        let mut runner = Environment::new("test_package", dir_path);
 
         // Boot the environment before accessing it
         runner.boot_main().expect("Failed to boot main environment");
@@ -971,7 +971,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
-        let mut runner = ImportRunner::new("test_package", dir_path);
+        let mut runner = Environment::new("test_package", dir_path);
 
         // Boot the environment before stopping it
         runner.boot_main().expect("Failed to boot main environment");
@@ -1006,8 +1006,8 @@ def main():
         let (pickled_data, _python_env) =
             crate::harness::prepare_script_for_isolation(python_script, "main")?;
 
-        // Create and boot the ImportRunner
-        let mut runner = ImportRunner::new("test_package", dir_path);
+        // Create and boot the Environment
+        let mut runner = Environment::new("test_package", dir_path);
         runner.boot_main()?;
 
         // Execute the script in isolation - this should not fail at this point
