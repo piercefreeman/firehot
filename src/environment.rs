@@ -434,7 +434,12 @@ pickled_str = "{}"
                     }
                     Message::ChildError(error) => {
                         error!("Received function error: {:?}", error);
-                        return Err(error.error);
+                        // Format the error with traceback information if available
+                        let error_message = match error.traceback {
+                            Some(traceback) => format!("{}\n\n{}", error.error, traceback),
+                            None => error.error,
+                        };
+                        return Err(error_message);
                     }
                     _ => {
                         trace!("Received other message type: {:?}", message);
@@ -810,11 +815,71 @@ mod tests {
         // This should stop the main Python process
         let result = runner.stop_main();
         assert!(result.is_ok());
-
-        // Verify that the function returns true since the environment is properly initialized
         assert!(
             result.unwrap(),
             "stop_main should return true after successful execution"
         );
+    }
+
+    #[test]
+    fn test_python_value_error_handling() -> Result<(), String> {
+        // Create a temporary directory for our test
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path().to_str().unwrap();
+
+        // Create a Python script that raises a ValueError with more context for traceback
+        let python_script = r#"
+def function_that_raises_error():
+    # This will raise a ValueError with a meaningful message
+    raise ValueError("This is a custom error message for testing")
+
+def main():
+    # Call the function that raises an error to generate a traceback
+    return function_that_raises_error()
+        "#;
+
+        // Prepare the script for isolation
+        let (pickled_data, _python_env) =
+            crate::harness::prepare_script_for_isolation(python_script, "main")?;
+
+        // Create and boot the ImportRunner
+        let mut runner = ImportRunner::new("test_package", dir_path);
+        runner.boot_main()?;
+
+        // Execute the script in isolation - this should not fail at this point
+        let process_uuid = runner.exec_isolated(&pickled_data)?;
+
+        // Wait a moment for the process to execute and fail
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Communicate with the isolated process to get the result
+        // This should contain the error
+        let result = runner.communicate_isolated(&process_uuid);
+
+        // Verify that we got an error
+        assert!(result.is_err(), "Expected an error but got: {:?}", result);
+
+        // Get the error message
+        let error_message = result.err().unwrap();
+
+        // The error should contain the specific error message
+        assert!(
+            error_message.contains("This is a custom error message"),
+            "Error should contain the custom error message but got: {}",
+            error_message
+        );
+
+        // The error should contain traceback information
+        assert!(
+            error_message.contains("Traceback")
+                || error_message.contains("function_that_raises_error"),
+            "Error should contain traceback information but got: {}",
+            error_message
+        );
+
+        // Clean up
+        runner.stop_isolated(&process_uuid)?;
+
+        Ok(())
     }
 }

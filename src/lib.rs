@@ -4,6 +4,7 @@ use once_cell::sync::Lazy;
 use owo_colors::OwoColorize;
 use std::{collections::HashMap, time::Instant};
 
+use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -20,6 +21,9 @@ pub mod scripts;
 pub use messages::{ExitRequest, ForkRequest, Message};
 use scripts::PYTHON_CALL_SCRIPT;
 
+// Create a custom Python exception for child process errors
+create_exception!(firehot, ChildException, PyRuntimeError);
+
 // Replace RUNNERS and other new collections with IMPORT_RUNNERS
 static IMPORT_RUNNERS: Lazy<Mutex<HashMap<String, environment::ImportRunner>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -27,6 +31,9 @@ static IMPORT_RUNNERS: Lazy<Mutex<HashMap<String, environment::ImportRunner>>> =
 /// Python module for hot reloading with isolated imports
 #[pymodule]
 fn firehot(_py: Python, m: &PyModule) -> PyResult<()> {
+    // Register the custom exception
+    m.add("ChildException", _py.get_type::<ChildException>())?;
+
     // Initialize the logger using Builder API
     let mut builder = env_logger::Builder::from_default_env();
 
@@ -263,9 +270,10 @@ fn communicate_isolated(
     let runners = IMPORT_RUNNERS.lock().unwrap();
     if let Some(runner) = runners.get(runner_id) {
         runner.communicate_isolated(process_uuid).map_err(|e| {
-            let err_msg = format!("Failed to communicate with isolated process: {}", e);
+            let err_msg = format!("Child process error: {}", e);
             error!("{}", err_msg);
-            PyRuntimeError::new_err(err_msg)
+            // Use the custom ChildException for Python errors
+            ChildException::new_err(err_msg)
         })
     } else {
         let err_msg = format!("No import runner found with ID: {}", runner_id);
