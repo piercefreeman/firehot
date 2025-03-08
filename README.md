@@ -82,8 +82,7 @@ When code changes are made in your project, we will:
 To test how firehot works with a real project, we bundle a `mypackage` and `external-package` library in this repo.
 
 ```bash
-make
-uv run test-hotreload
+(make build-develop && cd mypackage && FIREHOT_LOG_LEVEL=debug uv run test-hotreload)
 ```
 
 ## Unit tests

@@ -53,7 +53,7 @@ def main():
             f"{runner_name}: Imports have been loaded in an isolated process in {time.time() - start}s"
         )
 
-        count_reloads = 100
+        count_reloads = 2
         group_start = time.time()
         for _ in range(count_reloads):
             print("-" * 80)

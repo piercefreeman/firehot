@@ -157,8 +157,8 @@ def read_message() -> MessageBase | None:
 def main():
     # This will be populated with dynamic import statements from Rust
     dynamic_imports = sys.argv[1] if len(sys.argv) > 1 else ""
-    log_level = getenv("FIREHOT_LOG_LEVEL", "WARNING")
-    logging.basicConfig(level=log_level)
+    log_level = getenv("FIREHOT_LOG_LEVEL", "WARNING").upper()
+    logging.basicConfig(level=getattr(logging, log_level))
 
     # Execute the dynamic imports
     try:

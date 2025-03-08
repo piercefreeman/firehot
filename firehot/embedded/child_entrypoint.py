@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 module_path: str
 pickled_str: str
 
-log_level = getenv("FIREHOT_LOG_LEVEL", "WARNING")
-logging.basicConfig(level=log_level)
+log_level = getenv("FIREHOT_LOG_LEVEL", "WARNING").upper()
+logging.basicConfig(level=getattr(logging, log_level))
 
 # Decode base64 and unpickle
 pickled_bytes = base64.b64decode(pickled_str)
