@@ -30,7 +30,6 @@ pub enum ProcessResult {
 #[derive(Debug)]
 pub struct ForkedProcess {
     monitor_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
-    message_queue: Arc<Mutex<VecDeque<Message>>>,
     name: String,
     pid: i32,
     completion: Arc<(Mutex<ProcessResult>, Condvar)>, // Mutex paired with Condvar for signaling completion
@@ -40,7 +39,6 @@ impl Clone for ForkedProcess {
     fn clone(&self) -> Self {
         Self {
             monitor_thread: self.monitor_thread.clone(),
-            message_queue: self.message_queue.clone(),
             name: self.name.clone(),
             pid: self.pid,
             completion: self.completion.clone(),
@@ -406,21 +404,16 @@ pickled_str = "{}"
 
         // Store the PID with its UUID
         if let Some(pid_val) = pid {
-            // Create a message queue for this process
-            let message_queue = Arc::new(Mutex::new(VecDeque::new()));
-
             // Create a clone of the environment arc for the monitoring thread
             let env_arc = self.environment.as_ref().unwrap().clone();
             let process_id = process_uuid.clone();
             let process_name = name.to_string(); // Clone the name for the monitoring thread
-            let thread_message_queue = message_queue.clone(); // Clone for the thread
 
             // Start a monitoring thread for this process
             let handle = thread::spawn(move || {
                 Self::monitor_isolated_output(
                     env_arc,
                     process_id,
-                    thread_message_queue,
                     process_name,
                 );
             });
@@ -428,7 +421,6 @@ pickled_str = "{}"
             // Create a new ForkedProcess with the generated UUID
             let forked_process = ForkedProcess {
                 monitor_thread: Arc::new(Mutex::new(Some(handle))),
-                message_queue: message_queue.clone(),
                 name: name.to_string(),
                 pid: pid_val,
                 completion: Arc::new((Mutex::new(ProcessResult::None), Condvar::new())),
@@ -683,7 +675,6 @@ pickled_str = "{}"
     fn monitor_isolated_output(
         environment: Arc<Mutex<Environment>>,
         process_uuid: String,
-        message_queue: Arc<Mutex<VecDeque<Message>>>,
         process_name: String,
     ) {
         debug!(
@@ -764,17 +755,6 @@ pickled_str = "{}"
                                             }
                                         }
                                         
-                                        // Also queue the message for potential later consumption
-                                        if let Ok(mut queue) = message_queue.lock() {
-                                            queue.push_back(message.clone());
-                                            debug!(
-                                                "Queued message: {:?} for process {} ({})",
-                                                message.name(),
-                                                process_name,
-                                                process_uuid
-                                            );
-                                        }
-                                        
                                         // Remove it from the forked_processes map after setting the result
                                         drop(env_guard);
                                         if let Ok(mut env_guard) = environment.lock() {
@@ -811,17 +791,6 @@ pickled_str = "{}"
                                             }
                                         }
                                         
-                                        // Also queue the message for potential later consumption
-                                        if let Ok(mut queue) = message_queue.lock() {
-                                            queue.push_back(message.clone());
-                                            debug!(
-                                                "Queued message: {:?} for process {} ({})",
-                                                message.name(),
-                                                process_name,
-                                                process_uuid
-                                            );
-                                        }
-                                        
                                         // Remove it from the forked_processes map after setting the result
                                         drop(env_guard);
                                         if let Ok(mut env_guard) = environment.lock() {
@@ -837,10 +806,13 @@ pickled_str = "{}"
                                     break;
                                 },
                                 _ => {
-                                    // Queue other structured messages
-                                    if let Ok(mut queue) = message_queue.lock() {
-                                        queue.push_back(message);
-                                    }
+                                    // Just log other structured messages
+                                    debug!(
+                                        "Received message: {:?} for process {} ({})",
+                                        message.name(),
+                                        process_name,
+                                        process_uuid
+                                    );
                                 }
                             }
                         }
@@ -879,9 +851,6 @@ pickled_str = "{}"
                     break;
                 }
             }
-
-            // Small sleep to prevent CPU spinning
-            //std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
         debug!(
@@ -1131,9 +1100,6 @@ mod tests {
             let test_uuid = Uuid::new_v4().to_string();
             let test_pid = 12345;
 
-            // Create a mock message queue (mostly for backwards compatibility)
-            let message_queue = Arc::new(Mutex::new(VecDeque::new()));
-
             // Generate a timestamp for our test result
             let timestamp = format!(
                 "{}",
@@ -1147,26 +1113,14 @@ mod tests {
             let test_message = Message::ChildComplete(crate::messages::ChildComplete {
                 result: Some(timestamp.clone()),
             });
-            message_queue.lock().unwrap().push_back(test_message);
-
-            // Create a dummy thread that does nothing
-            let handle = thread::spawn(|| {
-                // Empty thread that immediately returns
-            });
-
-            // Create a ForkedProcess struct with a successful result
-            let completion = Arc::new((Mutex::new(ProcessResult::Success(Some(timestamp.clone()))), Condvar::new()));
-            let forked_process = ForkedProcess {
-                monitor_thread: Arc::new(Mutex::new(Some(handle))),
-                message_queue,
+            env_guard.forked_processes.insert(test_uuid.clone(), ForkedProcess {
+                monitor_thread: Arc::new(Mutex::new(Some(thread::spawn(|| {
+                    // Empty thread that immediately returns
+                })))),
                 name: "test_process".to_string(),
                 pid: test_pid,
-                completion,
-            };
-
-            env_guard
-                .forked_processes
-                .insert(test_uuid.clone(), forked_process);
+                completion: Arc::new((Mutex::new(ProcessResult::Success(Some(timestamp.clone()))), Condvar::new())),
+            });
 
             // Release the lock so we can use communicate_isolated
             drop(env_guard);
@@ -1217,9 +1171,6 @@ mod tests {
         let test_uuid = Uuid::new_v4().to_string();
         let test_pid = 23456;
 
-        // Create a mock message queue
-        let message_queue = Arc::new(Mutex::new(VecDeque::new()));
-
         // Create a dummy thread that does nothing
         let handle = thread::spawn(|| {
             // Empty thread that immediately returns
@@ -1228,7 +1179,6 @@ mod tests {
         // Create a ForkedProcess struct with the initial state
         let forked_process = ForkedProcess {
             monitor_thread: Arc::new(Mutex::new(Some(handle))),
-            message_queue,
             name: "test_isolated_process".to_string(),
             pid: test_pid,
             completion: Arc::new((Mutex::new(ProcessResult::None), Condvar::new())),
