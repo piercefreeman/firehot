@@ -46,6 +46,13 @@ jobs:
           */.venv
         key: ${{ runner.os }}-uv-deps-${{ matrix.package }}-${{ hashFiles('**/pyproject.toml') }}
     
+    - name: Set up Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+      
     - name: Create virtual environment
       run: |
         uv venv
@@ -87,7 +94,14 @@ jobs:
       run: |
         curl -LsSf https://astral.sh/uv/install.sh | sh
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-        
+
+    - name: Set up Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+    
     - name: Create virtual environment
       run: |
         uv venv
