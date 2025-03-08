@@ -148,9 +148,7 @@ fn stop_import_runner(_py: Python, env_id: &str) -> PyResult<()> {
     eprintln!(
         "\n{} {}\n",
         "⏹".yellow().bold(),
-        format!("Stopping environment {}", env_id)
-            .white()
-            .bold()
+        format!("Stopping environment {}", env_id).white().bold()
     );
 
     let start_time = Instant::now();

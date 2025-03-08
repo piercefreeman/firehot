@@ -44,6 +44,7 @@ class MessageBase:
 
 @dataclass
 class ForkRequest(MessageBase):
+    request_id: str
     code: str
 
     name: MessageType = MessageType.FORK_REQUEST
@@ -59,6 +60,7 @@ class ExitRequest(MessageBase):
 
 @dataclass
 class ForkResponse(MessageBase):
+    request_id: str
     child_pid: int
 
     name: MessageType = MessageType.FORK_RESPONSE

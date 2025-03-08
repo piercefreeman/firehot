@@ -298,7 +298,10 @@ pickled_str = "{}"
         );
 
         // Create a ForkRequest message
-        let fork_request = ForkRequest { code: exec_code };
+        let fork_request = ForkRequest {
+            request_id: process_uuid.clone(),
+            code: exec_code,
+        };
 
         let fork_json = serde_json::to_string(&Message::ForkRequest(fork_request))
             .map_err(|e| format!("Failed to serialize fork request: {}", e))?;
