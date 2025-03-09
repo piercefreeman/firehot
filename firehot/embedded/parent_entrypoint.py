@@ -46,7 +46,7 @@ class MessageBase:
 class ForkRequest(MessageBase):
     request_id: str
     code: str
-
+    request_name: str
     name: MessageType = MessageType.FORK_REQUEST
 
 
@@ -61,6 +61,8 @@ class ExitRequest(MessageBase):
 @dataclass
 class ForkResponse(MessageBase):
     request_id: str
+    request_name: str
+
     child_pid: int
 
     name: MessageType = MessageType.FORK_RESPONSE
@@ -260,7 +262,13 @@ def main():
 
             if isinstance(command, ForkRequest):
                 fork_pid = handle_fork_request(command.code)
-                write_message(ForkResponse(request_id=command.request_id, child_pid=fork_pid))
+                write_message(
+                    ForkResponse(
+                        request_id=command.request_id,
+                        request_name=command.request_name,
+                        child_pid=fork_pid,
+                    )
+                )
             elif isinstance(command, ExitRequest):
                 logging.info("Exiting loader process")
                 sys.stdout.flush()

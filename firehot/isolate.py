@@ -10,6 +10,7 @@ from firehot.firehot import (
 from firehot.firehot import (
     update_environment as update_environment_rs,
 )
+from firehot.naming import NAME_REGISTRY
 
 
 class ImportRunner:
@@ -26,7 +27,7 @@ class ImportRunner:
         """
         self.runner_id = runner_id
 
-    def exec(self, func: Callable, *args: Any) -> UUID:
+    def exec(self, func: Callable, *args: Any, name: str | None = None) -> UUID:
         """
         Execute a function in the isolated environment.
 
@@ -37,7 +38,8 @@ class ImportRunner:
         Returns:
             The result of the function execution
         """
-        return UUID(exec_isolated_rs(self.runner_id, func, args if args else None))
+        process_name = name or NAME_REGISTRY.reserve_random_name()
+        return UUID(exec_isolated_rs(self.runner_id, process_name, func, args if args else None))
 
     def communicate_isolated(self, process_uuid: UUID) -> str:
         """

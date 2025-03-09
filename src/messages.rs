@@ -24,6 +24,8 @@ pub trait MessageBase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForkRequest {
     pub request_id: String,
+    pub request_name: String,
+
     pub code: String,
 }
 
@@ -34,8 +36,12 @@ impl MessageBase for ForkRequest {
 }
 
 impl ForkRequest {
-    pub fn new(request_id: String, code: String) -> Self {
-        Self { request_id, code }
+    pub fn new(request_id: String, code: String, request_name: String) -> Self {
+        Self {
+            request_id,
+            code,
+            request_name,
+        }
     }
 }
 
@@ -65,6 +71,8 @@ impl ExitRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForkResponse {
     pub request_id: String,
+    pub request_name: String,
+
     pub child_pid: i32,
 }
 
@@ -75,9 +83,10 @@ impl MessageBase for ForkResponse {
 }
 
 impl ForkResponse {
-    pub fn new(request_id: String, child_pid: i32) -> Self {
+    pub fn new(request_id: String, request_name: String, child_pid: i32) -> Self {
         Self {
             request_id,
+            request_name,
             child_pid,
         }
     }

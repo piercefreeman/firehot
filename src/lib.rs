@@ -190,6 +190,7 @@ fn stop_import_runner(_py: Python, env_id: &str) -> PyResult<()> {
 fn exec_isolated<'py>(
     py: Python<'py>,
     env_id: &str,
+    name: &str,
     func: PyObject,
     args: Option<PyObject>,
 ) -> PyResult<&'py PyAny> {
@@ -218,7 +219,7 @@ fn exec_isolated<'py>(
     let environments = ENVIRONMENTS.lock().unwrap();
     if let Some(environment) = environments.get(env_id) {
         // Convert Rust Result<String, String> to PyResult
-        match environment.exec_isolated(&pickled_data) {
+        match environment.exec_isolated(&pickled_data, name) {
             Ok(result) => {
                 debug!("Function executed successfully in isolated process");
                 Ok(py.eval(&format!("'{}'", result), None, None)?)

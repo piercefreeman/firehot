@@ -285,7 +285,7 @@ impl Environment {
 
     /// This function executes code in a forked process (not in the main process
     /// that spawned our hotreloader) so we can get the local function and closure variables.
-    pub fn exec_isolated(&self, pickled_data: &str) -> Result<String, String> {
+    pub fn exec_isolated(&self, pickled_data: &str, name: &str) -> Result<String, String> {
         // Check if environment is initialized
         let environment = self
             .layer
@@ -328,6 +328,7 @@ pickled_str = "{}"
         // Create a ForkRequest message
         let fork_request = ForkRequest {
             request_id: process_uuid.clone(),
+            request_name: name.to_string(),
             code: exec_code,
         };
 
@@ -890,7 +891,7 @@ def main():
         runner.boot_main()?;
 
         // Execute the script in isolation - this should not fail at this point
-        let process_uuid = runner.exec_isolated(&pickled_data)?;
+        let process_uuid = runner.exec_isolated(&pickled_data, "test_script")?;
 
         // Wait a moment for the process to execute and fail
         std::thread::sleep(std::time::Duration::from_millis(100));

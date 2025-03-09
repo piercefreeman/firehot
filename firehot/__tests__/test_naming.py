@@ -83,7 +83,8 @@ def test_initialize_loop(name_manager: NameManager):
 
     # Check that lists were reshuffled
     is_different = any(
-        old_list != new_list for old_list, new_list in zip(old_word_lists, name_manager.word_lists, strict=False)
+        old_list != new_list
+        for old_list, new_list in zip(old_word_lists, name_manager.word_lists, strict=False)
     )
     assert is_different, "Lists should be reshuffled"
 

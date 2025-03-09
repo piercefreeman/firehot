@@ -1,4 +1,5 @@
 use log::{debug, error, info, trace, warn};
+use owo_colors::OwoColorize;
 use serde_json::{self};
 use std::collections::HashMap;
 use std::io::BufReader;
@@ -38,6 +39,7 @@ pub struct Layer {
     pub reader: Option<std::io::Lines<BufReader<std::process::ChildStdout>>>, // The reader of the forkable process
 
     pub forked_processes: Arc<Mutex<HashMap<String, i32>>>, // Map of UUID to PID
+    pub forked_names: Arc<Mutex<HashMap<String, String>>>,  // Map of UUID to name
 
     // These are pinged when the forked process finishes startup - either successful or failure
     pub fork_resolvers: Arc<Mutex<HashMap<String, AsyncResolve<ForkResult>>>>, // Map of UUID to fork resolver
@@ -61,6 +63,7 @@ impl Layer {
             stdin,
             reader: Some(reader),
             forked_processes: Arc::new(Mutex::new(HashMap::new())),
+            forked_names: Arc::new(Mutex::new(HashMap::new())),
             fork_resolvers: Arc::new(Mutex::new(HashMap::new())),
             completion_resolvers: Arc::new(Mutex::new(HashMap::new())),
             monitor_thread: None,
@@ -85,6 +88,7 @@ impl Layer {
         let fork_resolvers = Arc::clone(&self.fork_resolvers);
         let completion_resolvers = Arc::clone(&self.completion_resolvers);
         let forked_processes = Arc::clone(&self.forked_processes);
+        let forked_names = Arc::clone(&self.forked_names);
 
         // Start the monitor thread
         let thread_handle = thread::spawn(move || {
@@ -121,12 +125,17 @@ impl Layer {
 
                                 // Just print the log, don't store it
                                 if let Some(uuid) = process_uuid {
+                                    // If we're resolved a UUID from the PID, we should also have a name
+                                    let forked_names_guard = forked_names.lock().unwrap();
+                                    let process_name = forked_names_guard.get(&uuid.clone());
+
                                     match Self::handle_message(
                                         &log_line.content,
                                         Some(&uuid),
                                         &fork_resolvers,
                                         &completion_resolvers,
                                         &forked_processes,
+                                        &forked_names,
                                     ) {
                                         Ok(_) => {
                                             // Successfully handled the message, nothing more to do
@@ -134,7 +143,14 @@ impl Layer {
                                         Err(_e) => {
                                             // Expected error condition in the case that we didn't receive a message
                                             // but instead standard stdout
-                                            println!("[]: {}", log_line.content);
+                                            println!(
+                                                "[{}]: {}",
+                                                process_name
+                                                    .unwrap_or(&String::from("unknown"))
+                                                    .cyan()
+                                                    .bold(),
+                                                log_line.content
+                                            );
                                         }
                                     }
                                 } else {
@@ -154,6 +170,7 @@ impl Layer {
                                     &fork_resolvers,
                                     &completion_resolvers,
                                     &forked_processes,
+                                    &forked_names,
                                 ) {
                                     error!("Error handling log format: {}", line);
                                 }
@@ -192,6 +209,7 @@ impl Layer {
         fork_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ForkResult>>>>,
         completion_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ProcessResult>>>>,
         forked_processes: &Arc<Mutex<HashMap<String, i32>>>,
+        forked_names: &Arc<Mutex<HashMap<String, String>>>,
     ) -> Result<(), String> {
         if let Ok(message) = serde_json::from_str::<Message>(content) {
             match message {
@@ -203,6 +221,11 @@ impl Layer {
                     let mut forked_processes_guard = forked_processes.lock().unwrap();
                     forked_processes_guard.insert(response.request_id.clone(), response.child_pid);
                     drop(forked_processes_guard);
+
+                    // Store the process name in the forked names map
+                    let mut forked_names_guard = forked_names.lock().unwrap();
+                    forked_names_guard.insert(response.request_id.clone(), response.request_name);
+                    drop(forked_names_guard);
 
                     // Resolve the fork status
                     let fork_resolvers_guard = fork_resolvers.lock().unwrap();

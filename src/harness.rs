@@ -259,7 +259,7 @@ def main():
         runner.boot_main()?;
 
         // Execute the script in isolation
-        let process_uuid = runner.exec_isolated(&pickled_data)?;
+        let process_uuid = runner.exec_isolated(&pickled_data, "test_script")?;
 
         // Verify the result - should be a valid UUID string
         assert!(!process_uuid.is_empty());
