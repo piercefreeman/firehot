@@ -336,7 +336,7 @@ mod tests {
         );
 
         // Test ForkRequest
-        let json = r#"{"name": "FORK_REQUEST", "code": "print('hello')"}"#;
+        let json = r#"{"name": "FORK_REQUEST", "code": "print('hello')", "request_id": "test-id", "request_name": "test-name"}"#;
         let parsed: Result<Message, _> = serde_json::from_str(json);
         assert!(
             parsed.is_ok(),
@@ -345,7 +345,7 @@ mod tests {
         );
 
         // Test ForkResponse
-        let json = r#"{"name": "FORK_RESPONSE", "child_pid": 1234}"#;
+        let json = r#"{"name": "FORK_RESPONSE", "child_pid": 1234, "request_id": "test-id", "request_name": "test-name"}"#;
         let parsed: Result<Message, _> = serde_json::from_str(json);
         assert!(
             parsed.is_ok(),

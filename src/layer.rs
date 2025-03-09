@@ -156,8 +156,11 @@ impl Layer {
                                 } else {
                                     // If we can't match it to a specific process, log it with PID
                                     println!(
-                                        "Unmatched log: [{}:{}] {}",
-                                        log_line.pid, log_line.stream_name, log_line.content
+                                        "Unmatched log: [{}] {}",
+                                        format!("{}:{}", log_line.pid, log_line.stream_name)
+                                            .cyan()
+                                            .bold(),
+                                        log_line.content
                                     );
                                 }
                             }
@@ -262,10 +265,16 @@ impl Layer {
                     // from the child process
                     let uuid = uuid.expect("UUID should be known");
 
-                    // Resolve the completion with an error
+                    // Resolve the completion with an error, include both error message and traceback
                     let completion_resolvers_guard = completion_resolvers.lock().unwrap();
                     if let Some(resolver) = completion_resolvers_guard.get(uuid) {
-                        resolver.resolve(ProcessResult::Error(error.error.clone()));
+                        // Create a complete error message with both the error text and traceback if available
+                        let full_error = if let Some(traceback) = &error.traceback {
+                            format!("{}\n\n{}", error.error, traceback)
+                        } else {
+                            error.error.clone()
+                        };
+                        resolver.resolve(ProcessResult::Error(full_error));
                     } else {
                         error!("No resolver found for UUID: {}", uuid);
                     }
