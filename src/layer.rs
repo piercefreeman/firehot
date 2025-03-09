@@ -121,13 +121,22 @@ impl Layer {
 
                                 // Just print the log, don't store it
                                 if let Some(uuid) = process_uuid {
-                                    Self::handle_message(
+                                    match Self::handle_message(
                                         &log_line.content,
                                         Some(&uuid),
                                         &fork_resolvers,
                                         &completion_resolvers,
                                         &forked_processes,
-                                    );
+                                    ) {
+                                        Ok(_) => {
+                                            // Successfully handled the message, nothing more to do
+                                        }
+                                        Err(_e) => {
+                                            // Expected error condition in the case that we didn't receive a message
+                                            // but instead standard stdout
+                                            println!("[]: {}", log_line.content);
+                                        }
+                                    }
                                 } else {
                                     // If we can't match it to a specific process, log it with PID
                                     println!(
@@ -136,16 +145,18 @@ impl Layer {
                                     );
                                 }
                             }
-                            Err(e) => {
-                                warn!("Failed to parse multiplexed line: {}", e);
-                                // If parsing fails, print the raw line
-                                Self::handle_message(
+                            Err(_e) => {
+                                // If parsing fails, treat the line as a raw message. We will log the contents
+                                // separately if we fail processing
+                                if let Err(_e) = Self::handle_message(
                                     &line,
                                     None,
                                     &fork_resolvers,
                                     &completion_resolvers,
                                     &forked_processes,
-                                );
+                                ) {
+                                    error!("Error handling log format: {}", line);
+                                }
                             }
                         }
                     }
@@ -181,7 +192,7 @@ impl Layer {
         fork_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ForkResult>>>>,
         completion_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ProcessResult>>>>,
         forked_processes: &Arc<Mutex<HashMap<String, i32>>>,
-    ) {
+    ) -> Result<(), String> {
         if let Ok(message) = serde_json::from_str::<Message>(content) {
             match message {
                 Message::ForkResponse(response) => {
@@ -202,6 +213,7 @@ impl Layer {
                         error!("No resolver found for UUID: {}", response.request_id);
                     }
                     drop(fork_resolvers_guard);
+                    Ok(())
                 }
                 Message::ChildComplete(complete) => {
                     trace!("Monitor thread received function result: {:?}", complete);
@@ -218,6 +230,7 @@ impl Layer {
                         error!("No resolver found for UUID: {}", uuid);
                     }
                     drop(completion_resolvers_guard);
+                    Ok(())
                 }
                 Message::ChildError(error) => {
                     trace!("Monitor thread received error result: {:?}", error);
@@ -234,6 +247,7 @@ impl Layer {
                         error!("No resolver found for UUID: {}", uuid);
                     }
                     drop(completion_resolvers_guard);
+                    Ok(())
                 }
                 /*Message::ForkError(error) => {
                     warn!(
@@ -249,19 +263,24 @@ impl Layer {
                     drop(fork_resolvers_guard);
                 }*/
                 Message::UnknownError(error) => {
-                    error!("Monitor thread received unknown error: {}", error.error);
-
                     // For unknown errors, we don't have a UUID, so we can't resolve a specific promise
                     // Only log the error for now
+                    error!("Monitor thread received unknown error: {}", error.error);
+                    Ok(())
                 }
                 _ => {
-                    // Ignore other message types
-                    trace!("Monitor thread received unknown message type");
+                    // We should have a handler implemented for all messages types, capture the
+                    // unknown ones
+                    warn!("Monitor thread received unknown message type: {}", content);
+                    Ok(())
                 }
             }
         } else {
-            // Not a message - just print the raw content
-            println!("{}", content);
+            // Not a message
+            Err(format!(
+                "Failed to parse message, received raw content: {}",
+                content
+            ))
         }
     }
 
