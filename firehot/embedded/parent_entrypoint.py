@@ -168,13 +168,14 @@ class MultiplexedStream:
         # Add PID prefix to each line (newlines and lines with values)
         prefix = f"[PID:{self.pid}:{self.stream_name}]"
 
+        text = text.strip()
+        if not text:
+            return
+
         prefixed_text = ""
-        lines = text.splitlines(True)
-        if lines:
-            for line in lines:
-                prefixed_text += f"{prefix}{line}"
-        else:
-            prefixed_text = f"{prefix}{text}"
+        lines = text.split("\n")
+        for line in lines:
+            prefixed_text += f"{prefix}{line}\n"
         return self.original_stream.write(prefixed_text)
 
     def flush(self) -> None:
@@ -192,8 +193,15 @@ class MultiplexedStream:
 
 def main():
     # This will be populated with dynamic import statements from Rust
+    known_log_levels = {
+        "TRACE": logging.DEBUG,
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+    }
     dynamic_imports = sys.argv[1] if len(sys.argv) > 1 else ""
-    log_level = getenv("FIREHOT_LOG_LEVEL", "WARNING")
+    log_level = known_log_levels.get(getenv("FIREHOT_LOG_LEVEL", "WARNING"), logging.WARNING)
     logging.basicConfig(level=log_level)
 
     # Execute the dynamic imports

@@ -27,7 +27,7 @@ def test_write_single_line(mock_stream, multiplexed_stream):
     multiplexed_stream.write("Hello, world!")
 
     # Check the output has the correct prefix
-    expected = "[PID:12345:test_stream]Hello, world!"
+    expected = "[PID:12345:test_stream]Hello, world!\n"
     assert mock_stream.getvalue() == expected
 
 
@@ -40,7 +40,7 @@ def test_write_multiple_lines(mock_stream, multiplexed_stream):
     expected = (
         "[PID:12345:test_stream]Line 1\n"
         + "[PID:12345:test_stream]Line 2\n"
-        + "[PID:12345:test_stream]Line 3"
+        + "[PID:12345:test_stream]Line 3\n"
     )
     assert mock_stream.getvalue() == expected
 
@@ -50,9 +50,8 @@ def test_write_empty_string(mock_stream, multiplexed_stream):
     # Write an empty string
     multiplexed_stream.write("")
 
-    # Should write an empty string (no prefix)
-    expected = "[PID:12345:test_stream]"
-    assert mock_stream.getvalue() == expected
+    # Should not write anything
+    assert mock_stream.getvalue() == ""
 
 
 def test_flush():

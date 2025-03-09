@@ -546,7 +546,6 @@ fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
 mod tests {
     use super::*;
 
-    use crate::messages::ChildComplete;
     use tempfile::TempDir;
 
     use std::fs::File;
@@ -654,13 +653,6 @@ mod tests {
         // Get the PID of the new Python process
         let new_pid = runner.layer.as_ref().unwrap().lock().unwrap().child.id();
         println!("New process PID after import changes: {:?}", new_pid);
-
-        // For completeness, but we don't expect this to pass since we didn't actually restart
-        // the process in our test mock
-        // assert_ne!(
-        //     initial_pid, new_pid,
-        //     "Process should have been restarted with a different PID when imports changed"
-        // );
     }
 
     #[test]
@@ -668,97 +660,63 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
-        let mut runner = Environment::new("test_package", dir_path);
+        // Create a simple Python script that returns a timestamp
+        let python_script = r#"
+import time
+
+def main():
+    # Return the current timestamp as a string
+    return str(time.time())
+        "#;
+
+        // Prepare the script for isolation
+        let (pickled_data, python_env) =
+            crate::harness::prepare_script_for_isolation(python_script, "main")
+                .expect("Failed to prepare script for isolation");
+
+        let mut runner = Environment::new("test_package", &python_env.container_path);
 
         // Boot the environment before accessing it
         runner.boot_main().expect("Failed to boot main environment");
 
-        // Set up a mock test process
-        {
-            let env = runner.layer.as_ref().unwrap();
-            let mut env_guard = env.lock().unwrap();
+        // Execute the script in isolation
+        let process_uuid = runner
+            .exec_isolated(&pickled_data, "timestamp_test")
+            .expect("Failed to execute script in isolation");
 
-            // Create a test UUID and add it to the forked processes map
-            let test_uuid = Uuid::new_v4().to_string();
-            let test_pid = 12345;
+        // Wait a short time for the process to execute
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
-            // Lock the forked_processes map and insert the test process
-            let mut forked_processes = env_guard.forked_processes.lock().unwrap();
-            forked_processes.insert(test_uuid.clone(), test_pid);
-            drop(forked_processes);
+        // Now call communicate_isolated to get the result
+        let communicate_result = runner.communicate_isolated(&process_uuid);
+        assert!(
+            communicate_result.is_ok(),
+            "communicate_isolated failed: {:?}",
+            communicate_result.err()
+        );
 
-            // Create a completion resolver for the test UUID
-            let completion_resolver = AsyncResolve::new();
-            let mut completion_resolvers = env_guard.completion_resolvers.lock().unwrap();
-            completion_resolvers.insert(test_uuid.clone(), completion_resolver.clone());
-            drop(completion_resolvers);
+        let result_option = communicate_result.unwrap();
+        assert!(
+            result_option.is_some(),
+            "No result received from isolated process"
+        );
 
-            // Create a temporary file with our mock output
-            let temp_file = tempfile::NamedTempFile::new().unwrap();
-            let temp_file_path = temp_file.path().to_str().unwrap().to_string();
+        // The result should be our timestamp string
+        let result_str = result_option.unwrap();
+        println!("Result from time.time(): {}", result_str);
 
-            // Write the mock response to the file
-            let timestamp = format!(
-                "{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs_f64()
-            );
-            let message = Message::ChildComplete(ChildComplete {
-                result: Some(timestamp.clone()),
-            });
-            let message_json = serde_json::to_string(&message).unwrap();
-            std::fs::write(&temp_file_path, format!("{}\n", message_json)).unwrap();
+        // Try to parse the result as a float to verify it's a valid timestamp
+        let parsed_result = result_str.parse::<f64>();
+        assert!(
+            parsed_result.is_ok(),
+            "Failed to parse result as a float: {}",
+            result_str
+        );
 
-            // Create a Command that cats the temp file instead of a real Python process
-            let mut cat_cmd = std::process::Command::new("cat")
-                .arg(&temp_file_path)
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
-
-            // Swap the reader with our new one
-            let stdout = cat_cmd.stdout.take().unwrap();
-
-            let new_reader = BufReader::new(stdout).lines();
-
-            // Temporarily replace the environment's child process and reader
-            let _original_child = std::mem::replace(&mut env_guard.child, cat_cmd);
-            let _original_reader = std::mem::replace(&mut env_guard.reader, Some(new_reader));
-
-            // Release the lock so we can use communicate_isolated
-            drop(env_guard);
-
-            // Now call communicate_isolated to process our mocked output
-            let communicate_result = runner.communicate_isolated(&test_uuid);
-            assert!(
-                communicate_result.is_ok(),
-                "communicate_isolated failed: {:?}",
-                communicate_result.err()
-            );
-
-            let result_option = communicate_result.unwrap();
-            assert!(
-                result_option.is_some(),
-                "No result received from isolated process"
-            );
-
-            // The result should be our timestamp string
-            let result_str = result_option.unwrap();
-            println!("Result from time.time(): {}", result_str);
-
-            // Try to parse the result as a float to verify it's a valid timestamp
-            let parsed_result = result_str.parse::<f64>();
-            assert!(
-                parsed_result.is_ok(),
-                "Failed to parse result as a float: {}",
-                result_str
-            );
-
-            // Clean up
-            std::fs::remove_file(temp_file_path).ok();
-        }
+        // Clean up by stopping the isolated process
+        runner
+            .stop_isolated(&process_uuid)
+            .expect("Failed to stop isolated process");
     }
 
     #[test]
