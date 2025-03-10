@@ -180,14 +180,14 @@ ci-lint-rust:
 # Test target for hotreload package
 test-hotreload:
 	@echo "=== Running tests for hotreload package ==="
-	(cd $(ROOT_DIR) && uv run pytest -vvv) || { echo "FAILED: tests in $(ROOT_DIR)"; exit 1; }
+	(uv run pytest -vvv $(ROOT_DIR)) || { echo "FAILED: tests in $(ROOT_DIR)"; exit 1; }
 	@echo "=== Tests completed successfully for hotreload package ==="
 
 # Development build target
 build-develop:
 	@echo "=== Building development version for mypackage ==="
 	cd mypackage && \
-	(cd .. && uv run maturin build) && \
+	(cd .. && uv run maturin build $(MATURIN_ARGS)) && \
 	rm -f uv.lock && \
 	uv sync
 	@echo "=== Development build completed successfully ==="
