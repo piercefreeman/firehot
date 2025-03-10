@@ -24,16 +24,16 @@ def test_successful_execution(import_runner: ImportRunner):
     """Test that we can successfully execute a function in isolation."""
 
     # Execute the function in isolation
-    process_uuid = import_runner.exec(function_with_success, "World")
+    process = import_runner.exec(function_with_success, "World")
 
     # Ensure we got a valid UUID
-    assert isinstance(process_uuid, UUID)
+    assert isinstance(process.process_uuid, UUID)
 
     # Give it a moment to complete
     time.sleep(0.1)
 
     # Get the result
-    result = import_runner.communicate_isolated(process_uuid)
+    result = import_runner.communicate_isolated(process)
 
     # Verify the result
     assert result == "Hello, World!"
@@ -43,17 +43,17 @@ def test_exception_in_child_process(import_runner: ImportRunner):
     """Test that exceptions in child processes are properly handled."""
 
     # Execute the function in isolation
-    process_uuid = import_runner.exec(function_with_exception)
+    process = import_runner.exec(function_with_exception)
 
     # Ensure we got a valid UUID
-    assert isinstance(process_uuid, UUID)
+    assert isinstance(process.process_uuid, UUID)
 
     # Give it a moment to fail
     time.sleep(0.1)
 
     # Try to get the result, which should raise an exception
     with pytest.raises(Exception) as excinfo:
-        import_runner.communicate_isolated(process_uuid)
+        import_runner.communicate_isolated(process)
 
     # Verify the exception contains our error message
     assert "This is a deliberate test exception" in str(excinfo.value)

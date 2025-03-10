@@ -657,9 +657,6 @@ mod tests {
 
     #[test]
     fn test_exec_communicate_isolated_basic() {
-        let temp_dir = TempDir::new().unwrap();
-        let dir_path = temp_dir.path().to_str().unwrap();
-
         // Create a simple Python script that returns a timestamp
         let python_script = r#"
 import time
