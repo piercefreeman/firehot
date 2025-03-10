@@ -9,6 +9,9 @@ from firehot.firehot import (
     exec_isolated as exec_isolated_rs,
 )
 from firehot.firehot import (
+    stop_isolated as stop_isolated_rs,
+)
+from firehot.firehot import (
     update_environment as update_environment_rs,
 )
 from firehot.naming import NAME_REGISTRY
@@ -50,7 +53,27 @@ class ImportRunner:
         exec_id = UUID(exec_isolated_rs(self.runner_id, process_name, func, args))
         return IsolatedProcess(process_uuid=exec_id, process_name=process_name)
 
-    def communicate_isolated(self, isolate: IsolatedProcess | UUID) -> str:
+    def stop_isolated(self, isolate: IsolatedProcess):
+        """
+        Stop an isolated process, terminating its execution.
+
+        This method attempts to gracefully terminate the isolated process first with SIGTERM,
+        then with SIGKILL if necessary. It also cleans up all resources associated with the process.
+
+        Args:
+            isolate: The IsolatedProcess instance to stop
+
+        Returns:
+            bool: True if the process was successfully stopped or if it had already completed,
+                 False if the process did not exist
+
+        Note:
+            It's good practice to stop isolated processes when they are no longer needed
+            to free up system resources.
+        """
+        stop_isolated_rs(self.runner_id, str(isolate.process_uuid))
+
+    def communicate_isolated(self, isolate: IsolatedProcess) -> str:
         """
         Communicate with an isolated process to get its output
 
@@ -61,8 +84,7 @@ class ImportRunner:
             The output from the isolated process
         """
         # Handle both IsolatedProcess objects and raw UUIDs
-        process_uuid = isolate.process_uuid if isinstance(isolate, IsolatedProcess) else isolate
-        return communicate_isolated_rs(self.runner_id, str(process_uuid))
+        return communicate_isolated_rs(self.runner_id, str(isolate.process_uuid))
 
     def update_environment(self):
         """

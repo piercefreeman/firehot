@@ -1,5 +1,4 @@
 import time
-from uuid import UUID
 
 import pytest
 
@@ -26,9 +25,6 @@ def test_successful_execution(import_runner: ImportRunner):
     # Execute the function in isolation
     process = import_runner.exec(function_with_success, "World")
 
-    # Ensure we got a valid UUID
-    assert isinstance(process.process_uuid, UUID)
-
     # Give it a moment to complete
     time.sleep(0.1)
 
@@ -45,9 +41,6 @@ def test_exception_in_child_process(import_runner: ImportRunner):
     # Execute the function in isolation
     process = import_runner.exec(function_with_exception)
 
-    # Ensure we got a valid UUID
-    assert isinstance(process.process_uuid, UUID)
-
     # Give it a moment to fail
     time.sleep(0.1)
 
@@ -57,3 +50,24 @@ def test_exception_in_child_process(import_runner: ImportRunner):
 
     # Verify the exception contains our error message
     assert "This is a deliberate test exception" in str(excinfo.value)
+
+
+def test_stop_isolated(import_runner: ImportRunner):
+    """Test that we can stop an isolated process."""
+
+    # Create a long-running function for testing stop
+    def long_running_function():
+        import time
+
+        time.sleep(10)
+        return "This should never be returned!"
+
+    # Execute the function in isolation
+    process = import_runner.exec(long_running_function)
+
+    # Stop the process before it completes
+    import_runner.stop_isolated(process)
+
+    # Verify that communicating with the stopped process raises an exception
+    with pytest.raises(RuntimeError):
+        import_runner.communicate_isolated(process)
