@@ -10,13 +10,22 @@ import logging
 import os
 import sys
 from dataclasses import asdict, dataclass
-from enum import StrEnum
 from json import dumps as json_dumps
 from json import loads as json_loads
 from json.decoder import JSONDecodeError
 from os import getenv
 from time import sleep
 from traceback import format_exc
+
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        """Polyfill for StrEnum from Python 3.11."""
+
+        pass
 
 #
 # Messages
