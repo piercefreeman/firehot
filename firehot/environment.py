@@ -1,58 +1,87 @@
-import importlib.util
-from contextlib import contextmanager
-from pathlib import Path
+from dataclasses import dataclass
+from typing import Any, Callable
+from uuid import UUID
 
 from firehot.firehot import (
-    start_import_runner as start_import_runner_rs,
+    communicate_isolated as communicate_isolated_rs,
 )
 from firehot.firehot import (
-    stop_import_runner as stop_import_runner_rs,
+    exec_isolated as exec_isolated_rs,
 )
-from firehot.isolate import ImportRunner
+from firehot.firehot import (
+    stop_isolated as stop_isolated_rs,
+)
+from firehot.firehot import (
+    update_environment as update_environment_rs,
+)
+from firehot.naming import NAME_REGISTRY
 
 
-def resolve_package_metadata(package: str) -> tuple[str, str]:
+@dataclass
+class IsolatedProcess:
+    process_uuid: UUID
+    process_name: str
+
+
+class Environment:
     """
-    Resolve the package path and name
+    A class that represents an isolated Python environment for executing code. At any one
+    point in time, this environment will have a single built "layer" which shares the imported
+    3rd party dependencies. When new code is executed, it is forked from this layer to share
+    these dependencies.
+
     """
-    # We need to resolve the package to a path
-    spec = importlib.util.find_spec(package)
-    if spec is None:
-        raise ImportError(f"Could not find the package '{package}'")
 
-    package_path = spec.origin
-    package_name = spec.name
-    if package_path is None:
-        # For namespace packages
-        if spec.submodule_search_locations:
-            package_path = spec.submodule_search_locations[0]
-        else:
-            raise ImportError(f"Could not determine the path for package '{package}'")
+    def __init__(self, runner_id: str):
+        """
+        Initialize the Environment with a runner ID.
 
-    # We care about the root path, not a file. If we were returned __init__.py, we should
-    # use the directory instead.
-    if Path(package_path).is_file():
-        package_path = str(Path(package_path).parent)
+        :param runner_id: The unique identifier for this runner
+        """
+        self.runner_id = runner_id
 
-    return package_path, package_name
+    def exec(self, func: Callable, *args: Any, name: str | None = None) -> IsolatedProcess:
+        """
+        Execute a function in the isolated environment.
 
+        :param func: The function to execute. A function should fully contain its content, including imports
+        :param args: Arguments to pass to the function
+        :param name: Optional name for the process
+        :returns: An IsolatedProcess instance representing the execution
+        """
+        process_name = name or NAME_REGISTRY.reserve_random_name()
+        exec_id = UUID(exec_isolated_rs(self.runner_id, process_name, func, args))
+        return IsolatedProcess(process_uuid=exec_id, process_name=process_name)
 
-@contextmanager
-def isolate_imports(package: str):
-    """
-    Context manager that isolates imports for the given package path.
+    def stop_isolated(self, isolate: IsolatedProcess):
+        """
+        Stop an isolated process, terminating its execution.
 
-    :param package: Package to isolate imports. This must be importable from the current
-      virtual environment.
+        This method attempts to gracefully terminate the isolated process first with SIGTERM,
+        then with SIGKILL if necessary. It also cleans up all resources associated with the process.
 
-    Yields:
-        An ImportRunner object that can be used to execute code in the isolated environment
-    """
-    package_path, package_name = resolve_package_metadata(package)
-    runner_id: str | None = None
-    try:
-        runner_id = start_import_runner_rs(package_name, package_path)
-        yield ImportRunner(runner_id)
-    finally:
-        if runner_id:
-            stop_import_runner_rs(runner_id)
+        :param isolate: The IsolatedProcess instance to stop
+        :returns: True if the process was successfully stopped or if it had already completed,
+                 False if the process did not exist
+
+        .. note::
+           It's good practice to stop isolated processes when they are no longer needed
+           to free up system resources.
+        """
+        stop_isolated_rs(self.runner_id, str(isolate.process_uuid))
+
+    def communicate_isolated(self, isolate: IsolatedProcess) -> str:
+        """
+        Communicate with an isolated process to get its output.
+
+        :param isolate: Either an IsolatedProcess instance or a UUID object
+        :returns: The output from the isolated process
+        """
+        # Handle both IsolatedProcess objects and raw UUIDs
+        return communicate_isolated_rs(self.runner_id, str(isolate.process_uuid))
+
+    def update_environment(self):
+        """
+        Update the environment by checking for import changes and restarting if necessary.
+        """
+        return update_environment_rs(self.runner_id)

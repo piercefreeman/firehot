@@ -70,7 +70,6 @@ NOUNS: list[str] = [
 class NameManager:
     """
     Memory efficient, non-duplicating name manager.
-
     """
 
     word_lists: list[list[str]]
@@ -105,10 +104,10 @@ class NameManager:
     def initialize_loop(self) -> None:
         """
         Initialize a new loop through the combinations:
+
         - Reset indices to the beginning
         - Reshuffle the adjectives and nouns lists
         - Increment the loop counter for suffix addition
-
         """
         # Reset indices to beginning
         self.current_pointers = [0] * len(self.word_lists)
@@ -123,7 +122,10 @@ class NameManager:
     def reserve_random_name(self) -> str:
         """
         Reserve a random name using the counter-based approach.
+
         Ensures uniqueness across multiple exec runs.
+
+        :returns: A unique randomly generated name
         """
         # We need to check each word list in inverse order. Once we hit a max, we should increase
         # the previous index
