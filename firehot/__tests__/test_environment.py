@@ -1,31 +1,74 @@
-import importlib
-from pathlib import Path
+import time
 
-from firehot.environment import resolve_package_metadata
+import pytest
+
+from firehot.context import isolate_imports
+from firehot.environment import Environment
 
 
-def test_resolve_package_metadata(sample_package):
-    """
-    Test that resolve_package_metadata correctly resolves the package root path
-    and not a file like __init__.py
+@pytest.fixture
+def import_runner(sample_package):
+    with isolate_imports(sample_package) as runner:
+        yield runner
 
-    """
-    # Import the package to ensure it's in sys.modules
-    importlib.import_module(sample_package)
 
-    # Resolve the package metadata
-    package_path, package_name = resolve_package_metadata(sample_package)
+def function_with_exception():
+    raise ValueError("This is a deliberate test exception")
 
-    # Assertions
-    assert package_name == sample_package
 
-    # Check that package_path is a directory (not a file like __init__.py)
-    resolved_path = Path(package_path)
-    assert resolved_path.is_dir(), f"Expected directory path, got: {package_path}"
+def function_with_success(name):
+    return f"Hello, {name}!"
 
-    # Check that the directory contains the expected files
-    assert (resolved_path / "__init__.py").exists()
-    assert (resolved_path / "module.py").exists()
 
-    # Check that the directory name matches the package name
-    assert resolved_path.name == sample_package
+def test_successful_execution(import_runner: Environment):
+    """Test that we can successfully execute a function in isolation."""
+
+    # Execute the function in isolation
+    process = import_runner.exec(function_with_success, "World")
+
+    # Give it a moment to complete
+    time.sleep(0.1)
+
+    # Get the result
+    result = import_runner.communicate_isolated(process)
+
+    # Verify the result
+    assert result == "Hello, World!"
+
+
+def test_exception_in_child_process(import_runner: Environment):
+    """Test that exceptions in child processes are properly handled."""
+
+    # Execute the function in isolation
+    process = import_runner.exec(function_with_exception)
+
+    # Give it a moment to fail
+    time.sleep(0.1)
+
+    # Try to get the result, which should raise an exception
+    with pytest.raises(Exception) as excinfo:
+        import_runner.communicate_isolated(process)
+
+    # Verify the exception contains our error message
+    assert "This is a deliberate test exception" in str(excinfo.value)
+
+
+def test_stop_isolated(import_runner: Environment):
+    """Test that we can stop an isolated process."""
+
+    # Create a long-running function for testing stop
+    def long_running_function():
+        import time
+
+        time.sleep(10)
+        return "This should never be returned!"
+
+    # Execute the function in isolation
+    process = import_runner.exec(long_running_function)
+
+    # Stop the process before it completes
+    import_runner.stop_isolated(process)
+
+    # Verify that communicating with the stopped process raises an exception
+    with pytest.raises(RuntimeError):
+        import_runner.communicate_isolated(process)
