@@ -333,7 +333,13 @@ impl Layer {
         if let Some(terminate_tx) = self.thread_terminate_tx.lock().unwrap().take() {
             info!("Acquired termination sender, sending terminate signal to monitor thread");
             if let Err(e) = terminate_tx.send(()) {
-                warn!("Failed to send terminate signal to monitor thread: {}", e);
+                // Avoid logging warning for expected error
+                // If the channel is closed, it means the thread has already exited
+                if e.to_string().contains("sending on a closed channel") {
+                    info!("Monitor thread already exited (channel closed)");
+                } else {
+                    warn!("Failed to send terminate signal to monitor thread: {}", e);
+                }
             } else {
                 info!("Successfully sent termination signal to channel");
             }
