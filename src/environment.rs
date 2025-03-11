@@ -167,11 +167,55 @@ impl Environment {
 
         info!("Stopping main runner process");
 
+        let env_guard = layer
+            .lock()
+            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+
+        // First, stop all child processes
+        info!("Stopping all child processes before terminating main process");
+        let child_uuids = {
+            let forked_processes = env_guard
+                .forked_processes
+                .lock()
+                .map_err(|e| format!("Failed to lock forked processes: {}", e))?;
+
+            // Create a clone of all keys to avoid borrowing issues
+            forked_processes.keys().cloned().collect::<Vec<String>>()
+        };
+
+        // Drop the env_guard temporarily so we can call stop_isolated
+        drop(env_guard);
+
+        // Stop each child process
+        for uuid in child_uuids {
+            info!("Stopping child process with UUID: {}", uuid);
+            if let Err(e) = self.stop_isolated(&uuid) {
+                warn!("Failed to stop child process {}: {}", uuid, e);
+            }
+        }
+
+        // Re-acquire the env_guard
         let mut env_guard = layer
             .lock()
             .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
-        // IMPORTANT: Kill the main child process FIRST
+        // Now send ExitRequest to the parent process to allow it to clean up gracefully
+        info!("Sending ExitRequest to parent process");
+        let exit_request = ExitRequest::new();
+        let exit_json = serde_json::to_string(&Message::ExitRequest(exit_request))
+            .map_err(|e| format!("Failed to serialize exit request: {}", e))?;
+
+        // Send the message to the parent process
+        if let Err(e) = writeln!(env_guard.stdin, "{}", exit_json) {
+            warn!("Failed to write exit request to parent stdin: {}", e);
+        } else if let Err(e) = env_guard.stdin.flush() {
+            warn!("Failed to flush parent stdin: {}", e);
+        } else {
+            // Give it a moment to process the exit request
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        // Now kill the main child process if it hasn't already exited
         info!("Killing child process to unblock monitor thread");
         if let Err(e) = env_guard.child.kill() {
             warn!("Failed to kill child process: {}", e);
@@ -373,7 +417,7 @@ pickled_str = "{}"
             .ok_or_else(|| "Environment not initialized. Call boot_main first.".to_string())?;
 
         info!("Stopping isolated process: {}", process_uuid);
-        let mut env_guard = environment
+        let env_guard = environment
             .lock()
             .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
 
@@ -408,21 +452,6 @@ pickled_str = "{}"
                     warn!("Failed to send SIGKILL to PID {}: {}", pid, err);
                 }
             }
-        }
-
-        // Also send EXIT_REQUEST message to the process
-        // Create an ExitRequest message
-        let exit_request = ExitRequest::new();
-
-        let exit_json = serde_json::to_string(&Message::ExitRequest(exit_request))
-            .map_err(|e| format!("Failed to serialize exit request: {}", e))?;
-
-        // Send the message to the child process
-        if let Err(e) = writeln!(env_guard.stdin, "{}", exit_json) {
-            warn!("Failed to write exit request to child stdin: {}", e);
-            // We continue despite this error since we've already tried to kill the process
-        } else if let Err(e) = env_guard.stdin.flush() {
-            warn!("Failed to flush child stdin: {}", e);
         }
 
         // Remove the process from our maps
@@ -880,5 +909,68 @@ def main():
         runner.stop_isolated(&process_uuid)?;
 
         Ok(())
+    }
+
+    #[test]
+    fn test_stop_isolated_start_new_process() {
+        // Create a simple Python script that will be long-running
+        let python_long_running = r#"
+import time
+
+def main():
+    # Sleep for a while to simulate a long-running process
+    for i in range(10):
+        time.sleep(0.1)
+    return "Long running process completed"
+        "#;
+
+        // Prepare the scripts for isolation
+        // Keep the python_env in scope for the duration of the test
+        let (pickled_long_running, python_env) =
+            crate::harness::prepare_script_for_isolation(python_long_running, "main")
+                .expect("Failed to prepare long-running script for isolation");
+
+        // Create and boot environment
+        let mut runner = Environment::new("test_package", &python_env.container_path);
+        runner.boot_main().expect("Failed to boot main environment");
+
+        // Execute the long-running function
+        let process1_uuid = runner
+            .exec_isolated(&pickled_long_running, "long-runner")
+            .expect("Failed to execute long-running function");
+
+        // Give it a moment to start
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Now stop the long-running process
+        runner
+            .stop_isolated(&process1_uuid)
+            .expect("Failed to stop isolated process");
+
+        // Give it a moment to stop
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Now try to execute another function
+        // This should work now that we've fixed the ExitRequest issue
+        let process2_uuid = runner
+            .exec_isolated(&pickled_long_running, "long-runner-2")
+            .expect("Failed to execute second function");
+
+        // Give it a moment to complete
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+
+        // Verify we can communicate with the second process
+        let result = runner
+            .communicate_isolated(&process2_uuid)
+            .expect("Failed to communicate with second process");
+
+        // Verify the expected result
+        assert_eq!(result, Some("Long running process completed".to_string()));
+
+        // Clean up
+        runner
+            .stop_isolated(&process2_uuid)
+            .expect("Failed to stop second process");
+        runner.stop_main().expect("Failed to stop main process");
     }
 }
