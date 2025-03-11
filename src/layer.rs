@@ -518,8 +518,8 @@ mod tests {
 
     #[test]
     fn test_stderr_handling() -> Result<(), String> {
-        // Import gag for capturing stdout in tests
-        //use gag::BufferRedirect;
+        // Import our custom RedirectLogs for capturing stdout in tests
+        use crate::test_utils::redirect::RedirectLogs;
         use std::io::Read;
 
         // Create a temporary directory for our test
@@ -545,12 +545,12 @@ def main():
     return function_with_stderr_output()
         "#;
 
+        // Create a RedirectLogs to capture stdout
+        let redirection = RedirectLogs::new().expect("Failed to redirect stdout");
+
         // Prepare the script for isolation
         let (pickled_data, _python_env) =
             crate::test_utils::harness::prepare_script_for_isolation(python_script, "main")?;
-
-        // Create a buffer to redirect stdout for capturing the output
-        //let mut buf = BufferRedirect::stdout().unwrap();
 
         // Create and boot the Environment
         let mut runner = Environment::new("test_package", dir_path);
@@ -575,12 +575,9 @@ def main():
             "Incorrect return value from isolated process"
         );
 
-        // Get the captured output
-        /*let mut output = String::new();
-        buf.read_to_string(&mut output).unwrap();
-
-        // Drop the buffer to restore stdout
-        drop(buf);
+        // Finalize the redirection to get the captured output
+        let output_bytes = redirection.finish().expect("Failed to finish redirection");
+        let output = String::from_utf8(output_bytes).expect("Invalid UTF-8 in captured output");
 
         // This assertion should PASS because stdout is being properly captured
         assert!(
@@ -588,20 +585,19 @@ def main():
             "Expected to find stdout message in the captured output"
         );
 
-        // This assertion should FAIL because stderr is not being properly captured
-        // When stderr capture is properly implemented, this test will pass
+        // This assertion should now PASS because stderr should also be captured by our RedirectLogs implementation
         assert!(
             output.contains("UNIQUE_STDERR_OUTPUT_FOR_TESTING_12345"),
-            "Failed to find stderr message in the captured output - stderr is not being properly captured"
-        );*/
+            "Failed to find stderr message in the captured output"
+        );
 
         Ok(())
     }
 
     #[test]
     fn test_debug_log_handling() -> Result<(), String> {
-        // Import gag for capturing stdout in tests
-        //use gag::BufferRedirect;
+        // Import our custom RedirectLogs for capturing stdout in tests
+        use crate::test_utils::redirect::RedirectLogs;
         use std::io::Read;
 
         // Configure logging for this test
@@ -634,8 +630,8 @@ def main():
     return function_with_log_output()
         "#;
 
-        // Create a buffer to redirect stdout for capturing the output
-        //let mut buf = BufferRedirect::stdout().unwrap();
+        // Create a RedirectLogs to capture stdout
+        let redirection = RedirectLogs::new().expect("Failed to redirect stdout");
 
         // Prepare the script for isolation
         let (pickled_data, _python_env) =
@@ -662,15 +658,12 @@ def main():
             "Incorrect return value from isolated process"
         );
 
-        // Get the captured output
-        //let mut output = String::new();
-        //buf.read_to_string(&mut output).unwrap();
+        // Finalize the redirection to get the captured output
+        let output_bytes = redirection.finish().expect("Failed to finish redirection");
+        let output = String::from_utf8(output_bytes).expect("Invalid UTF-8 in captured output");
 
-        // Drop the buffer to restore stdout
-        //drop(buf);
-
-        // This assertion should PASS for all log levels now that we handle stdout/stderr properly
-        /*assert!(
+        // Check that all log levels were captured properly
+        assert!(
             output.contains("UNIQUE_DEBUG_LOG_MESSAGE_12345"),
             "Failed to capture DEBUG log message"
         );
@@ -683,7 +676,7 @@ def main():
         assert!(
             output.contains("UNIQUE_WARNING_LOG_MESSAGE_54321"),
             "Failed to capture WARNING log message"
-        );*/
+        );
 
         Ok(())
     }

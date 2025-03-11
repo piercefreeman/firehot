@@ -1,11 +1,7 @@
-// More general version of https://github.com/Stebalien/gag-rs
-// Works around cargo tests that use a special std::io::set_print to capture stdout
-// and therefore can't be patched by the BufferRedirect. Instead here we actually
-// redirect the file descriptors so we can capture content from the tests alongside
-// spawned FFI processes.
+// redirect_logs.rs
 use std::fs::File;
-use std::io::{self, Read};
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::io::{self, Read, Write};
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -44,14 +40,13 @@ impl RedirectLogs {
             if libc::dup2(write_fd, libc::STDOUT_FILENO) < 0 {
                 return Err(io::Error::last_os_error());
             }
-            // We can now close the original write end; STDOUT_FILENO refers to it.
+            // Now that STDOUT_FILENO refers to the pipe's write end, close the original write_fd.
             libc::close(write_fd);
 
             let captured = Arc::new(Mutex::new(Vec::new()));
             let captured_thread = Arc::clone(&captured);
 
             // Duplicate original_stdout for use in the background thread.
-            // (This duplicate will be used solely by the thread for writing to real stdout.)
             let orig_stdout_for_thread = libc::dup(original_stdout);
             if orig_stdout_for_thread < 0 {
                 return Err(io::Error::last_os_error());
@@ -93,22 +88,30 @@ impl RedirectLogs {
     }
 
     /// Returns the captured output as a vector of bytes.
+    /// (May not be complete until redirection is finalized.)
     pub fn get_captured(&self) -> Vec<u8> {
         self.captured.lock().unwrap().clone()
     }
-}
 
-impl Drop for RedirectLogs {
-    fn drop(&mut self) {
+    /// Finalizes the redirection: flushes stdout, restores the original stdout
+    /// (thereby closing the pipe's write end so the reader thread can finish),
+    /// and joins the background thread. Returns the complete captured output.
+    pub fn finish(mut self) -> io::Result<Vec<u8>> {
+        // Flush stdout to ensure all output is written.
+        io::stdout().flush()?;
         unsafe {
             // Restore the original stdout by duplicating our saved descriptor back to STDOUT_FILENO.
-            libc::dup2(self.original_stdout_fd, libc::STDOUT_FILENO);
+            if libc::dup2(self.original_stdout_fd, libc::STDOUT_FILENO) < 0 {
+                return Err(io::Error::last_os_error());
+            }
             libc::close(self.original_stdout_fd);
         }
         // Wait for the background thread to finish.
         if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
+            handle.join().expect("Failed to join redirect thread");
         }
+        // Return the captured output.
+        Ok(self.get_captured())
     }
 }
 
@@ -119,19 +122,17 @@ mod tests {
 
     #[test]
     fn test_redirect_logs() {
-        // Create the redirect logs, which redirects stdout.
+        // Create the redirection.
         let redirection = RedirectLogs::new().expect("Failed to redirect stdout");
-        
+
         // Write something to stdout.
         println!("Hello from redirect_logs!");
-        
-        // Get the captured output before dropping the redirection
-        let output = String::from_utf8(redirection.get_captured()).expect("Invalid UTF-8");
-        
-        // Drop the redirection so that stdout is restored.
-        drop(redirection);
 
-        // Now check the captured output
-        assert!(output.contains("Hello from redirect_logs!"));
+        // Finalize the redirection to ensure all output is captured.
+        let output = redirection.finish().expect("Failed to finish redirection");
+        let output_str = String::from_utf8(output).expect("Invalid UTF-8");
+
+        // Now check the captured output.
+        assert!(output_str.contains("Hello from redirect_logs!"));
     }
 }
