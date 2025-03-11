@@ -76,8 +76,18 @@ impl Environment {
             .take()
             .ok_or_else(|| "Failed to capture stdout for python process".to_string())?;
 
+        // Also capture stderr
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "Failed to capture stderr for python process".to_string())?;
+
         let reader = BufReader::new(stdout);
         let mut lines_iter = reader.lines();
+
+        // Create a stderr reader
+        let stderr_reader = BufReader::new(stderr);
+        let stderr_lines_iter = stderr_reader.lines();
 
         // Wait for the ImportComplete message
         info!("Waiting for import completion...");
@@ -145,7 +155,7 @@ impl Environment {
         );
 
         // Create the environment
-        let mut layer = Layer::new(child, stdin, lines_iter);
+        let mut layer = Layer::new(child, stdin, lines_iter, stderr_lines_iter);
 
         // Start the monitor thread
         layer.start_monitor_thread();

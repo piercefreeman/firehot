@@ -37,6 +37,7 @@ pub struct Layer {
     pub child: Child,                    // The forkable process with all imports loaded
     pub stdin: std::process::ChildStdin, // The stdin of the forkable process
     pub reader: Option<std::io::Lines<BufReader<std::process::ChildStdout>>>, // The reader of the forkable process
+    pub stderr_reader: Option<std::io::Lines<BufReader<std::process::ChildStderr>>>, // The stderr reader of the forkable process
 
     pub forked_processes: Arc<Mutex<HashMap<String, i32>>>, // Map of UUID to PID
     pub forked_names: Arc<Mutex<HashMap<String, String>>>,  // Map of UUID to name
@@ -57,11 +58,13 @@ impl Layer {
         child: Child,
         stdin: std::process::ChildStdin,
         reader: std::io::Lines<BufReader<std::process::ChildStdout>>,
+        stderr_reader: std::io::Lines<BufReader<std::process::ChildStderr>>,
     ) -> Self {
         Self {
             child,
             stdin,
             reader: Some(reader),
+            stderr_reader: Some(stderr_reader),
             forked_processes: Arc::new(Mutex::new(HashMap::new())),
             forked_names: Arc::new(Mutex::new(HashMap::new())),
             fork_resolvers: Arc::new(Mutex::new(HashMap::new())),
@@ -71,18 +74,23 @@ impl Layer {
         }
     }
 
-    /// Start a monitoring thread that continuously reads from the child process stdout
-    /// and populates the result_map with parsed output
+    /// Start monitoring threads that concurrently read from the child process stdout and stderr
+    /// to avoid blocking if one stream has no content while the other does
     pub fn start_monitor_thread(&mut self) {
         // Create a channel for signaling thread termination
         let (terminate_tx, terminate_rx) = mpsc::channel();
+        let (terminate_tx_stderr, terminate_rx_stderr) = mpsc::channel();
         {
             let mut tx_guard = self.thread_terminate_tx.lock().unwrap();
-            *tx_guard = Some(terminate_tx);
+            *tx_guard = Some(terminate_tx.clone());
         }
 
-        // Take ownership of the reader
-        let reader = self.reader.take().expect("Reader should be available");
+        // Take ownership of the readers
+        let stdout_reader = self.reader.take().expect("Reader should be available");
+        let stderr_reader = self
+            .stderr_reader
+            .take()
+            .expect("Stderr reader should be available");
 
         // Clone the shared resolver maps for the monitor thread
         let fork_resolvers = Arc::clone(&self.fork_resolvers);
@@ -90,119 +98,185 @@ impl Layer {
         let forked_processes = Arc::clone(&self.forked_processes);
         let forked_names = Arc::clone(&self.forked_names);
 
-        // Start the monitor thread
-        let thread_handle = thread::spawn(move || {
-            info!("Monitor thread started");
-            let mut reader = reader;
+        // Clone for stderr thread
+        let fork_resolvers_stderr = Arc::clone(&self.fork_resolvers);
+        let completion_resolvers_stderr = Arc::clone(&self.completion_resolvers);
+        let forked_processes_stderr = Arc::clone(&self.forked_processes);
+        let forked_names_stderr = Arc::clone(&self.forked_names);
+
+        // Start a separate thread for stderr to avoid blocking on stdout reads
+        let stderr_thread = thread::spawn(move || {
+            info!("Monitor thread for stderr started");
+            let mut stderr_reader = stderr_reader;
 
             loop {
-                trace!("Monitor thread checking for termination signal");
                 // Check if we've been asked to terminate
-                if terminate_rx.try_recv().is_ok() {
-                    info!("Monitor thread received terminate signal, breaking out of loop");
+                if terminate_rx_stderr.try_recv().is_ok() {
+                    info!("Stderr monitor thread received terminate signal, breaking out of loop");
                     break;
                 }
 
-                trace!("Monitor thread attempting to read next line");
-                // Try to read a line from the child process
-                match reader.next() {
+                // Try to read a line from stderr
+                match stderr_reader.next() {
                     Some(Ok(line)) => {
-                        trace!("Monitor thread read line: {}", line);
-                        // All lines streamed from the forked process (even our own messages)
-                        // should be multiplexed lines
-                        match parse_multiplexed_line(&line) {
-                            Ok(log_line) => {
-                                // Find which process this log belongs to based on PID
-                                let forked_definitions = forked_processes.lock().unwrap();
-                                let mut process_uuid = None;
-
-                                for (uuid, pid) in forked_definitions.iter() {
-                                    if *pid == log_line.pid as i32 {
-                                        process_uuid = Some(uuid.clone());
-                                        break;
-                                    }
-                                }
-
-                                // Just print the log, don't store it
-                                if let Some(uuid) = process_uuid {
-                                    // If we're resolved a UUID from the PID, we should also have a name
-                                    let forked_names_guard = forked_names.lock().unwrap();
-                                    let process_name = forked_names_guard.get(&uuid.clone());
-
-                                    match Self::handle_message(
-                                        &log_line.content,
-                                        Some(&uuid),
-                                        &fork_resolvers,
-                                        &completion_resolvers,
-                                        &forked_processes,
-                                        &forked_names,
-                                    ) {
-                                        Ok(_) => {
-                                            // Successfully handled the message, nothing more to do
-                                        }
-                                        Err(_e) => {
-                                            // Expected error condition in the case that we didn't receive a message
-                                            // but instead standard stdout
-                                            println!(
-                                                "[{}]: {}",
-                                                process_name
-                                                    .unwrap_or(&String::from("unknown"))
-                                                    .cyan()
-                                                    .bold(),
-                                                log_line.content
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    // If we can't match it to a specific process, log it with PID
-                                    println!(
-                                        "Unmatched log: [{}] {}",
-                                        format!("{}:{}", log_line.pid, log_line.stream_name)
-                                            .cyan()
-                                            .bold(),
-                                        log_line.content
-                                    );
-                                }
-                            }
-                            Err(_e) => {
-                                // If parsing fails, treat the line as a raw message. We will log the contents
-                                // separately if we fail processing
-                                if let Err(_e) = Self::handle_message(
-                                    &line,
-                                    None,
-                                    &fork_resolvers,
-                                    &completion_resolvers,
-                                    &forked_processes,
-                                    &forked_names,
-                                ) {
-                                    error!("Error handling log format: {}", line);
-                                }
-                            }
-                        }
+                        trace!("Stderr monitor thread read line: {}", line);
+                        Self::process_output_line(
+                            &line,
+                            &fork_resolvers_stderr,
+                            &completion_resolvers_stderr,
+                            &forked_processes_stderr,
+                            &forked_names_stderr,
+                        );
                     }
                     Some(Err(e)) => {
-                        error!("Error reading from child process: {}", e);
-                        info!("Breaking out of monitor loop due to read error");
+                        error!("Error reading from child process stderr: {}", e);
                         break;
                     }
                     None => {
-                        // End of stream
-                        info!("End of child process output stream detected (stdout was closed), breaking out of monitor loop");
+                        // End of stream for stderr
+                        info!("End of child process stderr stream detected, exiting stderr monitor thread");
                         break;
                     }
                 }
+            }
 
-                // Check again for termination after processing a line
+            info!("Stderr monitor thread exiting");
+        });
+
+        // Start the stdout monitor thread
+        let thread_handle = thread::spawn(move || {
+            info!("Monitor thread for stdout started");
+            let mut stdout_reader = stdout_reader;
+
+            loop {
+                // Check if we've been asked to terminate
                 if terminate_rx.try_recv().is_ok() {
-                    info!("Monitor thread received terminate signal after processing, breaking out of loop");
+                    info!("Monitor thread received terminate signal, breaking out of loop");
+                    // Also terminate the stderr thread
+                    let _ = terminate_tx_stderr.send(());
                     break;
                 }
+
+                // Try to read a line from stdout
+                match stdout_reader.next() {
+                    Some(Ok(line)) => {
+                        trace!("Monitor thread read line from stdout: {}", line);
+                        Self::process_output_line(
+                            &line,
+                            &fork_resolvers,
+                            &completion_resolvers,
+                            &forked_processes,
+                            &forked_names,
+                        );
+                    }
+                    Some(Err(e)) => {
+                        error!("Error reading from child process stdout: {}", e);
+                        // Also terminate the stderr thread
+                        let _ = terminate_tx_stderr.send(());
+                        break;
+                    }
+                    None => {
+                        // End of stream for stdout
+                        info!("End of child process stdout stream detected, breaking out of monitor loop");
+                        // Also terminate the stderr thread
+                        let _ = terminate_tx_stderr.send(());
+                        break;
+                    }
+                }
+            }
+
+            // Wait for stderr thread to finish
+            if let Err(e) = stderr_thread.join() {
+                error!("Failed to join stderr thread: {:?}", e);
+            } else {
+                info!("Successfully joined stderr thread");
             }
 
             info!("Monitor thread exiting");
         });
 
         self.monitor_thread = Some(thread_handle);
+    }
+
+    /// Helper function to process an output line from either stdout or stderr
+    fn process_output_line(
+        line: &str,
+        fork_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ForkResult>>>>,
+        completion_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ProcessResult>>>>,
+        forked_processes: &Arc<Mutex<HashMap<String, i32>>>,
+        forked_names: &Arc<Mutex<HashMap<String, String>>>,
+    ) {
+        // All lines streamed from the forked process (even our own messages)
+        // should be multiplexed lines
+        match parse_multiplexed_line(line) {
+            Ok(log_line) => {
+                // Find which process this log belongs to based on PID
+                let forked_definitions = forked_processes.lock().unwrap();
+                let mut process_uuid = None;
+
+                for (uuid, pid) in forked_definitions.iter() {
+                    if *pid == log_line.pid as i32 {
+                        process_uuid = Some(uuid.clone());
+                        break;
+                    }
+                }
+
+                // Just print the log, don't store it
+                if let Some(uuid) = process_uuid {
+                    // If we're resolved a UUID from the PID, we should also have a name
+                    let forked_names_guard = forked_names.lock().unwrap();
+                    let process_name = forked_names_guard.get(&uuid.clone());
+
+                    match Self::handle_message(
+                        &log_line.content,
+                        Some(&uuid),
+                        fork_resolvers,
+                        completion_resolvers,
+                        forked_processes,
+                        forked_names,
+                    ) {
+                        Ok(_) => {
+                            // Successfully handled the message, nothing more to do
+                        }
+                        Err(_e) => {
+                            // Expected error condition in the case that we didn't receive a message
+                            // but instead standard stdout
+                            println!(
+                                "[{}]: {}",
+                                process_name
+                                    .unwrap_or(&String::from("unknown"))
+                                    .cyan()
+                                    .bold(),
+                                log_line.content
+                            );
+                        }
+                    }
+                } else {
+                    // If we can't match it to a specific process, log it with PID
+                    println!(
+                        "Unmatched log: [{}] {}",
+                        format!("{}:{}", log_line.pid, log_line.stream_name)
+                            .cyan()
+                            .bold(),
+                        log_line.content
+                    );
+                }
+            }
+            Err(_e) => {
+                // If parsing fails, treat the line as a raw message. We will log the contents
+                // separately if we fail processing
+                if let Err(_e) = Self::handle_message(
+                    line,
+                    None,
+                    fork_resolvers,
+                    completion_resolvers,
+                    forked_processes,
+                    forked_names,
+                ) {
+                    error!("Error handling log format: {}", line);
+                }
+            }
+        }
     }
 
     /// Handle various messages from the child process
@@ -318,8 +392,9 @@ impl Layer {
 
     /// Stop the monitoring thread if it's running
     pub fn stop_monitor_thread(&mut self) {
-        info!("Beginning monitor thread shutdown procedure");
+        info!("Stopping monitor thread");
 
+        // Send termination signal to the main monitor thread (which will relay to stderr thread)
         {
             let tx_guard = self.thread_terminate_tx.lock().unwrap();
             match &*tx_guard {
@@ -347,6 +422,7 @@ impl Layer {
             warn!("No termination channel found - monitor thread might not be running or already being shut down");
         }
 
+        // Wait for main monitor thread to complete (which also waits for stderr thread)
         match &self.monitor_thread {
             Some(_) => info!("Monitor thread handle exists - will attempt to join"),
             None => warn!("No monitor thread handle found - already taken or never created"),
@@ -360,23 +436,22 @@ impl Layer {
                 info!("Successfully joined monitor thread");
             }
         } else {
-            warn!("No thread handle found - monitor thread might not be running or already being shut down");
+            warn!("No monitor thread handle found - already taken or never created");
         }
-
-        info!("Monitor thread shutdown procedure completed");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    
+    use crate::environment::Environment;
+    use tempfile::TempDir;
+
     #[test]
     fn test_stderr_handling() -> Result<(), String> {
         // Import gag for capturing stdout in tests
         use gag::BufferRedirect;
         use std::io::Read;
-        
+
         // Create a temporary directory for our test
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
@@ -406,7 +481,7 @@ def main():
 
         // Create a buffer to redirect stdout for capturing the output
         let mut buf = BufferRedirect::stdout().unwrap();
-        
+
         // Create and boot the Environment
         let mut runner = Environment::new("test_package", dir_path);
         runner.boot_main()?;
@@ -419,37 +494,37 @@ def main():
 
         // Communicate with the isolated process to get the result
         let result = runner.communicate_isolated(&process_uuid)?;
-        
+
         // Clean up first to ensure all output is generated
         runner.stop_isolated(&process_uuid)?;
-        
+
         // Verify we got the return value from the function
         assert_eq!(
             result,
             Some("Function executed successfully".to_string()),
             "Incorrect return value from isolated process"
         );
-        
+
         // Get the captured output
         let mut output = String::new();
         buf.read_to_string(&mut output).unwrap();
-        
+
         // Drop the buffer to restore stdout
         drop(buf);
-        
+
         // This assertion should PASS because stdout is being properly captured
         assert!(
             output.contains("UNIQUE_STDOUT_OUTPUT_FOR_TESTING_67890"),
             "Expected to find stdout message in the captured output"
         );
-        
+
         // This assertion should FAIL because stderr is not being properly captured
         // When stderr capture is properly implemented, this test will pass
         assert!(
             output.contains("UNIQUE_STDERR_OUTPUT_FOR_TESTING_12345"),
             "Failed to find stderr message in the captured output - stderr is not being properly captured"
         );
-        
+
         Ok(())
     }
 }
