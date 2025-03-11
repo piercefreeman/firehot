@@ -67,6 +67,7 @@ jobs:
         env:
           FIREHOT_LOG_LEVEL: trace
         run: cargo test --lib --all
+        timeout-minutes: 5
 
   # Build maturin packages for each target OS
   build_wheels:
