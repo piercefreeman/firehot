@@ -2,12 +2,12 @@ use log::{debug, error, info, trace, warn};
 use owo_colors::OwoColorize;
 use serde_json::{self};
 use std::collections::HashMap;
+use std::io::BufRead;
 use std::io::BufReader;
 use std::process::Child;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::io::BufRead;
 
 use crate::async_resolve::AsyncResolve;
 use crate::messages::Message;
@@ -49,8 +49,10 @@ pub struct Layer {
     // These are pinged when the process completes execution
     pub completion_resolvers: Arc<Mutex<HashMap<String, AsyncResolve<ProcessResult>>>>, // Map of UUID to completion resolver
 
-    pub monitor_thread: Option<JoinHandle<()>>, // Thread handle for monitoring output
+    pub stdout_thread: Option<JoinHandle<()>>, // Thread handle for stdout monitoring
+    pub stderr_thread: Option<JoinHandle<()>>, // Thread handle for stderr monitoring
     pub thread_terminate_tx: Arc<Mutex<Option<Sender<()>>>>, // Channel to signal thread termination
+    pub stderr_terminate_tx: Arc<Mutex<Option<Sender<()>>>>, // Channel to signal stderr thread termination
 }
 
 impl Layer {
@@ -70,25 +72,35 @@ impl Layer {
             forked_names: Arc::new(Mutex::new(HashMap::new())),
             fork_resolvers: Arc::new(Mutex::new(HashMap::new())),
             completion_resolvers: Arc::new(Mutex::new(HashMap::new())),
-            monitor_thread: None,
+            stdout_thread: None,
+            stderr_thread: None,
             thread_terminate_tx: Arc::new(Mutex::new(None)),
+            stderr_terminate_tx: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Start monitoring threads that concurrently read from the child process stdout and stderr
     /// to avoid blocking if one stream has no content while the other does
     pub fn start_monitor_thread(&mut self) {
-        // Create a channel for signaling thread termination
-        let (terminate_tx, terminate_rx) = mpsc::channel();
-        let (terminate_tx_stderr, terminate_rx_stderr) = mpsc::channel();
+        // Create channels for signaling thread termination
+        let (stdout_terminate_tx, stdout_terminate_rx) = mpsc::channel();
+        let (stderr_terminate_tx, stderr_terminate_rx) = mpsc::channel();
+
+        // Store the termination channels
         {
             let mut tx_guard = self.thread_terminate_tx.lock().unwrap();
-            *tx_guard = Some(terminate_tx.clone());
+            *tx_guard = Some(stdout_terminate_tx.clone());
+
+            let mut stderr_tx_guard = self.stderr_terminate_tx.lock().unwrap();
+            *stderr_tx_guard = Some(stderr_terminate_tx.clone());
         }
 
         // Take ownership of the readers
         let stdout_reader = self.reader.take().expect("Reader should be available");
-        let stderr_reader = self.stderr_reader.take().expect("Stderr reader should be available");
+        let stderr_reader = self
+            .stderr_reader
+            .take()
+            .expect("Stderr reader should be available");
 
         // Clone the shared resolver maps for the monitor threads
         let fork_resolvers_stdout = Arc::clone(&self.fork_resolvers);
@@ -106,7 +118,7 @@ impl Layer {
             Self::monitor_stream(
                 stderr_reader,
                 "stderr",
-                terminate_rx_stderr,
+                stderr_terminate_rx,
                 &fork_resolvers_stderr,
                 &completion_resolvers_stderr,
                 &forked_processes_stderr,
@@ -115,33 +127,31 @@ impl Layer {
             );
         });
 
+        // Store the stderr thread handle
+        self.stderr_thread = Some(stderr_thread);
+
         // Start the stdout monitor thread
-        let thread_handle = thread::spawn(move || {
+        let stdout_thread = thread::spawn(move || {
             Self::monitor_stream(
                 stdout_reader,
                 "stdout",
-                terminate_rx,
+                stdout_terminate_rx,
                 &fork_resolvers_stdout,
                 &completion_resolvers_stdout,
                 &forked_processes_stdout,
                 &forked_names_stdout,
-                Some(terminate_tx_stderr), // Ability to terminate stderr thread
+                Some(stderr_terminate_tx), // Ability to terminate stderr thread
             );
 
-            // Wait for stderr thread to finish
-            if let Err(e) = stderr_thread.join() {
-                error!("Failed to join stderr thread: {:?}", e);
-            } else {
-                info!("Successfully joined stderr thread");
-            }
-
-            info!("Monitor thread exiting");
+            info!("Stdout monitor thread exiting");
         });
 
-        self.monitor_thread = Some(thread_handle);
+        // Store the stdout thread handle
+        self.stdout_thread = Some(stdout_thread);
     }
 
     /// Common function to monitor a stream (stdout or stderr)
+    #[allow(clippy::too_many_arguments)]
     fn monitor_stream<R: BufRead>(
         reader: std::io::Lines<R>,
         stream_name: &str,
@@ -158,7 +168,10 @@ impl Layer {
         loop {
             // Check if we've been asked to terminate
             if terminate_rx.try_recv().is_ok() {
-                info!("{} monitor thread received terminate signal, breaking out of loop", stream_name);
+                info!(
+                    "{} monitor thread received terminate signal, breaking out of loop",
+                    stream_name
+                );
                 break;
             }
 
@@ -167,11 +180,11 @@ impl Layer {
                 Some(Ok(line)) => {
                     trace!("{} monitor thread read line: {}", stream_name, line);
                     Self::process_output_line(
-                        &line, 
-                        fork_resolvers, 
-                        completion_resolvers, 
-                        forked_processes, 
-                        forked_names
+                        &line,
+                        fork_resolvers,
+                        completion_resolvers,
+                        forked_processes,
+                        forked_names,
                     );
                 }
                 Some(Err(e)) => {
@@ -184,7 +197,10 @@ impl Layer {
                 }
                 None => {
                     // End of stream
-                    info!("End of child process {} stream detected, exiting {} monitor thread", stream_name, stream_name);
+                    info!(
+                        "End of child process {} stream detected, exiting {} monitor thread",
+                        stream_name, stream_name
+                    );
                     // Terminate stderr thread if needed
                     if let Some(tx) = &stderr_terminate_tx {
                         let _ = tx.send(());
@@ -389,54 +405,109 @@ impl Layer {
         }
     }
 
-    /// Stop the monitoring thread if it's running
+    /// Stop the monitoring threads if they're running
     pub fn stop_monitor_thread(&mut self) {
-        info!("Stopping monitor thread");
+        info!("Stopping monitor threads");
 
-        // Send termination signal to the main monitor thread (which will relay to stderr thread)
+        // ---------- Stop stdout thread ----------
+        // Send termination signal to the stdout monitor thread
         {
             let tx_guard = self.thread_terminate_tx.lock().unwrap();
             match &*tx_guard {
-                Some(_) => info!("Termination sender exists - will attempt to send signal"),
+                Some(_) => info!("Stdout termination sender exists - will attempt to send signal"),
                 None => warn!(
-                    "No termination sender found in the mutex - already taken or never created"
+                    "No stdout termination sender found in the mutex - already taken or never created"
                 ),
             }
         }
 
         if let Some(terminate_tx) = self.thread_terminate_tx.lock().unwrap().take() {
-            info!("Acquired termination sender, sending terminate signal to monitor thread");
+            info!("Acquired stdout termination sender, sending terminate signal");
             if let Err(e) = terminate_tx.send(()) {
                 // Avoid logging warning for expected error
                 // If the channel is closed, it means the thread has already exited
                 if e.to_string().contains("sending on a closed channel") {
-                    info!("Monitor thread already exited (channel closed)");
+                    info!("Stdout monitor thread already exited (channel closed)");
                 } else {
-                    warn!("Failed to send terminate signal to monitor thread: {}", e);
+                    warn!(
+                        "Failed to send terminate signal to stdout monitor thread: {}",
+                        e
+                    );
                 }
             } else {
-                info!("Successfully sent termination signal to channel");
+                info!("Successfully sent termination signal to stdout channel");
             }
         } else {
-            warn!("No termination channel found - monitor thread might not be running or already being shut down");
+            warn!("No stdout termination channel found - monitor thread might not be running or already being shut down");
         }
 
-        // Wait for main monitor thread to complete (which also waits for stderr thread)
-        match &self.monitor_thread {
-            Some(_) => info!("Monitor thread handle exists - will attempt to join"),
-            None => warn!("No monitor thread handle found - already taken or never created"),
+        // Wait for stdout thread to complete
+        match &self.stdout_thread {
+            Some(_) => info!("Stdout thread handle exists - will attempt to join"),
+            None => warn!("No stdout thread handle found - already taken or never created"),
         }
 
-        if let Some(handle) = self.monitor_thread.take() {
-            info!("Acquired thread handle, waiting for monitor thread to terminate");
+        if let Some(handle) = self.stdout_thread.take() {
+            info!("Acquired stdout thread handle, waiting for thread to terminate");
             if let Err(e) = handle.join() {
-                error!("Failed to join monitor thread: {:?}", e);
+                error!("Failed to join stdout thread: {:?}", e);
             } else {
-                info!("Successfully joined monitor thread");
+                info!("Successfully joined stdout thread");
             }
         } else {
-            warn!("No monitor thread handle found - already taken or never created");
+            warn!("No stdout thread handle found - already taken or never created");
         }
+
+        // ---------- Stop stderr thread ----------
+        // Send termination signal to the stderr monitor thread
+        {
+            let tx_guard = self.stderr_terminate_tx.lock().unwrap();
+            match &*tx_guard {
+                Some(_) => info!("Stderr termination sender exists - will attempt to send signal"),
+                None => warn!(
+                    "No stderr termination sender found in the mutex - already taken or never created"
+                ),
+            }
+        }
+
+        if let Some(terminate_tx) = self.stderr_terminate_tx.lock().unwrap().take() {
+            info!("Acquired stderr termination sender, sending terminate signal");
+            if let Err(e) = terminate_tx.send(()) {
+                // Avoid logging warning for expected error
+                // If the channel is closed, it means the thread has already exited
+                if e.to_string().contains("sending on a closed channel") {
+                    info!("Stderr monitor thread already exited (channel closed)");
+                } else {
+                    warn!(
+                        "Failed to send terminate signal to stderr monitor thread: {}",
+                        e
+                    );
+                }
+            } else {
+                info!("Successfully sent termination signal to stderr channel");
+            }
+        } else {
+            warn!("No stderr termination channel found - monitor thread might not be running or already being shut down");
+        }
+
+        // Wait for stderr thread to complete
+        match &self.stderr_thread {
+            Some(_) => info!("Stderr thread handle exists - will attempt to join"),
+            None => warn!("No stderr thread handle found - already taken or never created"),
+        }
+
+        if let Some(handle) = self.stderr_thread.take() {
+            info!("Acquired stderr thread handle, waiting for thread to terminate");
+            if let Err(e) = handle.join() {
+                error!("Failed to join stderr thread: {:?}", e);
+            } else {
+                info!("Successfully joined stderr thread");
+            }
+        } else {
+            warn!("No stderr thread handle found - already taken or never created");
+        }
+
+        info!("All monitor threads stopped");
     }
 }
 
