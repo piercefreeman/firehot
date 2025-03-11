@@ -707,7 +707,7 @@ def main():
 
         // Prepare the script for isolation
         let (pickled_data, python_env) =
-            crate::harness::prepare_script_for_isolation(python_script, "main")
+            crate::test_utils::harness::prepare_script_for_isolation(python_script, "main")
                 .expect("Failed to prepare script for isolation");
 
         let mut runner = Environment::new("test_package", &python_env.container_path);
@@ -878,7 +878,7 @@ def main():
 
         // Prepare the script for isolation
         let (pickled_data, _python_env) =
-            crate::harness::prepare_script_for_isolation(python_script, "main")?;
+            crate::test_utils::harness::prepare_script_for_isolation(python_script, "main")?;
 
         // Create and boot the Environment
         let mut runner = Environment::new("test_package", dir_path);
@@ -934,10 +934,9 @@ def main():
     return "Long running process completed"
         "#;
 
-        // Prepare the scripts for isolation
-        // Keep the python_env in scope for the duration of the test
+        // Prepare the script for isolation
         let (pickled_long_running, python_env) =
-            crate::harness::prepare_script_for_isolation(python_long_running, "main")
+            crate::test_utils::harness::prepare_script_for_isolation(python_long_running, "main")
                 .expect("Failed to prepare long-running script for isolation");
 
         // Create and boot environment
