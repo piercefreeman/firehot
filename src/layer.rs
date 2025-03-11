@@ -7,6 +7,7 @@ use std::process::Child;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::io::BufRead;
 
 use crate::async_resolve::AsyncResolve;
 use crate::messages::Message;
@@ -87,103 +88,45 @@ impl Layer {
 
         // Take ownership of the readers
         let stdout_reader = self.reader.take().expect("Reader should be available");
-        let stderr_reader = self
-            .stderr_reader
-            .take()
-            .expect("Stderr reader should be available");
+        let stderr_reader = self.stderr_reader.take().expect("Stderr reader should be available");
 
-        // Clone the shared resolver maps for the monitor thread
-        let fork_resolvers = Arc::clone(&self.fork_resolvers);
-        let completion_resolvers = Arc::clone(&self.completion_resolvers);
-        let forked_processes = Arc::clone(&self.forked_processes);
-        let forked_names = Arc::clone(&self.forked_names);
+        // Clone the shared resolver maps for the monitor threads
+        let fork_resolvers_stdout = Arc::clone(&self.fork_resolvers);
+        let completion_resolvers_stdout = Arc::clone(&self.completion_resolvers);
+        let forked_processes_stdout = Arc::clone(&self.forked_processes);
+        let forked_names_stdout = Arc::clone(&self.forked_names);
 
-        // Clone for stderr thread
         let fork_resolvers_stderr = Arc::clone(&self.fork_resolvers);
         let completion_resolvers_stderr = Arc::clone(&self.completion_resolvers);
         let forked_processes_stderr = Arc::clone(&self.forked_processes);
         let forked_names_stderr = Arc::clone(&self.forked_names);
 
-        // Start a separate thread for stderr to avoid blocking on stdout reads
+        // Start a separate thread for stderr monitoring
         let stderr_thread = thread::spawn(move || {
-            info!("Monitor thread for stderr started");
-            let mut stderr_reader = stderr_reader;
-
-            loop {
-                // Check if we've been asked to terminate
-                if terminate_rx_stderr.try_recv().is_ok() {
-                    info!("Stderr monitor thread received terminate signal, breaking out of loop");
-                    break;
-                }
-
-                // Try to read a line from stderr
-                match stderr_reader.next() {
-                    Some(Ok(line)) => {
-                        trace!("Stderr monitor thread read line: {}", line);
-                        Self::process_output_line(
-                            &line,
-                            &fork_resolvers_stderr,
-                            &completion_resolvers_stderr,
-                            &forked_processes_stderr,
-                            &forked_names_stderr,
-                        );
-                    }
-                    Some(Err(e)) => {
-                        error!("Error reading from child process stderr: {}", e);
-                        break;
-                    }
-                    None => {
-                        // End of stream for stderr
-                        info!("End of child process stderr stream detected, exiting stderr monitor thread");
-                        break;
-                    }
-                }
-            }
-
-            info!("Stderr monitor thread exiting");
+            Self::monitor_stream(
+                stderr_reader,
+                "stderr",
+                terminate_rx_stderr,
+                &fork_resolvers_stderr,
+                &completion_resolvers_stderr,
+                &forked_processes_stderr,
+                &forked_names_stderr,
+                None, // No need to send termination to other threads
+            );
         });
 
         // Start the stdout monitor thread
         let thread_handle = thread::spawn(move || {
-            info!("Monitor thread for stdout started");
-            let mut stdout_reader = stdout_reader;
-
-            loop {
-                // Check if we've been asked to terminate
-                if terminate_rx.try_recv().is_ok() {
-                    info!("Monitor thread received terminate signal, breaking out of loop");
-                    // Also terminate the stderr thread
-                    let _ = terminate_tx_stderr.send(());
-                    break;
-                }
-
-                // Try to read a line from stdout
-                match stdout_reader.next() {
-                    Some(Ok(line)) => {
-                        trace!("Monitor thread read line from stdout: {}", line);
-                        Self::process_output_line(
-                            &line,
-                            &fork_resolvers,
-                            &completion_resolvers,
-                            &forked_processes,
-                            &forked_names,
-                        );
-                    }
-                    Some(Err(e)) => {
-                        error!("Error reading from child process stdout: {}", e);
-                        // Also terminate the stderr thread
-                        let _ = terminate_tx_stderr.send(());
-                        break;
-                    }
-                    None => {
-                        // End of stream for stdout
-                        info!("End of child process stdout stream detected, breaking out of monitor loop");
-                        // Also terminate the stderr thread
-                        let _ = terminate_tx_stderr.send(());
-                        break;
-                    }
-                }
-            }
+            Self::monitor_stream(
+                stdout_reader,
+                "stdout",
+                terminate_rx,
+                &fork_resolvers_stdout,
+                &completion_resolvers_stdout,
+                &forked_processes_stdout,
+                &forked_names_stdout,
+                Some(terminate_tx_stderr), // Ability to terminate stderr thread
+            );
 
             // Wait for stderr thread to finish
             if let Err(e) = stderr_thread.join() {
@@ -196,6 +139,62 @@ impl Layer {
         });
 
         self.monitor_thread = Some(thread_handle);
+    }
+
+    /// Common function to monitor a stream (stdout or stderr)
+    fn monitor_stream<R: BufRead>(
+        reader: std::io::Lines<R>,
+        stream_name: &str,
+        terminate_rx: mpsc::Receiver<()>,
+        fork_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ForkResult>>>>,
+        completion_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ProcessResult>>>>,
+        forked_processes: &Arc<Mutex<HashMap<String, i32>>>,
+        forked_names: &Arc<Mutex<HashMap<String, String>>>,
+        stderr_terminate_tx: Option<mpsc::Sender<()>>,
+    ) {
+        info!("Monitor thread for {} started", stream_name);
+        let mut reader = reader;
+
+        loop {
+            // Check if we've been asked to terminate
+            if terminate_rx.try_recv().is_ok() {
+                info!("{} monitor thread received terminate signal, breaking out of loop", stream_name);
+                break;
+            }
+
+            // Try to read a line from the stream
+            match reader.next() {
+                Some(Ok(line)) => {
+                    trace!("{} monitor thread read line: {}", stream_name, line);
+                    Self::process_output_line(
+                        &line, 
+                        fork_resolvers, 
+                        completion_resolvers, 
+                        forked_processes, 
+                        forked_names
+                    );
+                }
+                Some(Err(e)) => {
+                    error!("Error reading from child process {}: {}", stream_name, e);
+                    // Terminate stderr thread if needed
+                    if let Some(tx) = &stderr_terminate_tx {
+                        let _ = tx.send(());
+                    }
+                    break;
+                }
+                None => {
+                    // End of stream
+                    info!("End of child process {} stream detected, exiting {} monitor thread", stream_name, stream_name);
+                    // Terminate stderr thread if needed
+                    if let Some(tx) = &stderr_terminate_tx {
+                        let _ = tx.send(());
+                    }
+                    break;
+                }
+            }
+        }
+
+        info!("{} monitor thread exiting", stream_name);
     }
 
     /// Helper function to process an output line from either stdout or stderr
