@@ -315,12 +315,7 @@ class MultiplexedStream:
                 instance.stop_redirection()
 
 
-#
-# Main Logic
-#
-
-
-def main():
+def build_firehot_logger():
     # This will be populated with dynamic import statements from Rust
     known_log_levels = {
         "TRACE": logging.DEBUG,
@@ -329,9 +324,22 @@ def main():
         "WARNING": logging.WARNING,
         "ERROR": logging.ERROR,
     }
-    dynamic_imports = sys.argv[1] if len(sys.argv) > 1 else ""
     log_level = known_log_levels.get(getenv("FIREHOT_LOG_LEVEL", "WARNING"), logging.WARNING)
-    logging.basicConfig(level=log_level)
+
+    logger = logging.getLogger("firehot")
+    logger.setLevel(log_level)
+
+    return logger
+
+
+#
+# Main Logic
+#
+
+
+def main():
+    dynamic_imports = sys.argv[1] if len(sys.argv) > 1 else ""
+    firehot_logger = build_firehot_logger()
 
     # Execute the dynamic imports
     try:
@@ -357,13 +365,13 @@ def main():
                     exec_globals = globals().copy()
                     exec_locals = {}
 
-                    logging.info("Will execute code in forked process...")
+                    firehot_logger.info("Will execute code in forked process...")
                     sys.stdout.flush()
 
                     # Execute the code
                     exec(code_to_execute, exec_globals, exec_locals)
 
-                    logging.info("Executed code in forked process")
+                    firehot_logger.info("Executed code in forked process")
                     sys.stdout.flush()
 
                     # By convention, the result is stored in the 'result' variable
@@ -399,7 +407,7 @@ def main():
                     )
                 )
             elif isinstance(command, ExitRequest):
-                logging.info("Exiting loader process")
+                firehot_logger.info("Exiting loader process")
                 sys.stdout.flush()
                 break
             else:

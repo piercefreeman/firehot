@@ -24,16 +24,25 @@ if TYPE_CHECKING:
 module_path: str
 pickled_str: str
 
-known_log_levels = {
-    "TRACE": logging.DEBUG,
-    "DEBUG": logging.DEBUG,
-    "INFO": logging.INFO,
-    "WARNING": logging.WARNING,
-    "ERROR": logging.ERROR,
-}
-dynamic_imports = sys.argv[1] if len(sys.argv) > 1 else ""
-log_level = known_log_levels.get(getenv("FIREHOT_LOG_LEVEL", "WARNING"), logging.WARNING)
-logging.basicConfig(level=log_level)
+
+def build_firehot_logger():
+    # This will be populated with dynamic import statements from Rust
+    known_log_levels = {
+        "TRACE": logging.DEBUG,
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+    }
+    log_level = known_log_levels.get(getenv("FIREHOT_LOG_LEVEL", "WARNING"), logging.WARNING)
+
+    logger = logging.getLogger("firehot")
+    logger.setLevel(log_level)
+
+    return logger
+
+
+firehot_logger = build_firehot_logger()
 
 # Decode base64 and unpickle
 pickled_bytes = base64.b64decode(pickled_str)
@@ -44,7 +53,7 @@ data: "SerializedCall" = pickle.loads(pickled_bytes)
 # this lets us more explicitly handle errors and issue debugging logs.
 module_path = data["func_module_path"]
 if module_path:
-    logging.info(f"Importing module: {module_path}")
+    firehot_logger.info(f"Importing module: {module_path}")
     sys.stdout.flush()
     # Try to import the module or reload it if already imported
     if module_path in sys.modules:
