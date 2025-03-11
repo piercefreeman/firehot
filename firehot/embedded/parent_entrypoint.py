@@ -274,6 +274,10 @@ class MultiplexedStream:
 
         self.active = False
 
+        # Wait for monitor thread to finish
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            self.monitor_thread.join(timeout=1.0)
+
         # Restore original file descriptor
         if self.original_fd_dup is not None:
             os.dup2(self.original_fd_dup, self.original_fd)
@@ -284,10 +288,6 @@ class MultiplexedStream:
         if self.write_fd is not None:
             os.close(self.write_fd)
             self.write_fd = None
-
-        # Wait for monitor thread to finish
-        if self.monitor_thread and self.monitor_thread.is_alive():
-            self.monitor_thread.join(timeout=1.0)
 
         # Restore Python stdout/stderr
         if self.stream_name == "stdout":
@@ -349,39 +349,34 @@ def main():
         pid = os.fork()
         if pid == 0:
             # Child process
-            try:
-                # Set up globals and locals for execution
-                exec_globals = globals().copy()
-                exec_locals = {}
 
-                # Set up stream redirection to catch all output including logging
-                MultiplexedStream.setup_stream_redirection()
+            # Set up stream redirection to catch all output from the child process
+            with MultiplexedStream.setup_stream_redirection():
+                try:
+                    # Set up globals and locals for execution
+                    exec_globals = globals().copy()
+                    exec_locals = {}
 
-                logging.info("Will execute code in forked process...")
-                sys.stdout.flush()
+                    logging.info("Will execute code in forked process...")
+                    sys.stdout.flush()
 
-                # Execute the code
-                exec(code_to_execute, exec_globals, exec_locals)
+                    # Execute the code
+                    exec(code_to_execute, exec_globals, exec_locals)
 
-                logging.info("Executed code in forked process")
-                sys.stdout.flush()
+                    logging.info("Executed code in forked process")
+                    sys.stdout.flush()
 
-                # By convention, the result is stored in the 'result' variable
-                if "result" in exec_locals:
-                    write_message(ChildComplete(result=str(exec_locals["result"])))
-                else:
-                    write_message(ChildComplete(result=None))
+                    # By convention, the result is stored in the 'result' variable
+                    if "result" in exec_locals:
+                        write_message(ChildComplete(result=str(exec_locals["result"])))
+                    else:
+                        write_message(ChildComplete(result=None))
 
-                # Clean up stream redirection before exiting
-                MultiplexedStream.cleanup_stream_redirection()
-                sys.exit(0)
-            except Exception as e:
-                # Clean up stream redirection before exiting with error
-                MultiplexedStream.cleanup_stream_redirection()
-
-                # Report the error
-                write_message(ChildError(error=str(e), traceback=format_exc()))
-                sys.exit(1)
+                    sys.exit(0)
+                except Exception as e:
+                    # Report the error
+                    write_message(ChildError(error=str(e), traceback=format_exc()))
+                    sys.exit(1)
         else:
             # Parent process. The PID will represent the child process.
             return pid
