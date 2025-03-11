@@ -366,3 +366,90 @@ impl Layer {
         info!("Monitor thread shutdown procedure completed");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_stderr_handling() -> Result<(), String> {
+        // Import gag for capturing stdout in tests
+        use gag::BufferRedirect;
+        use std::io::Read;
+        
+        // Create a temporary directory for our test
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path().to_str().unwrap();
+
+        // Create a Python script that writes to stderr
+        let python_script = r#"
+def function_with_stderr_output():
+    # Write to stderr with a unique string we can look for
+    import sys
+    sys.stderr.write("UNIQUE_STDERR_OUTPUT_FOR_TESTING_12345\n")
+    sys.stderr.flush()
+    
+    # Also write to stdout with a different unique string
+    sys.stdout.write("UNIQUE_STDOUT_OUTPUT_FOR_TESTING_67890\n")
+    sys.stdout.flush()
+    
+    # Return success
+    return "Function executed successfully"
+
+def main():
+    return function_with_stderr_output()
+        "#;
+
+        // Prepare the script for isolation
+        let (pickled_data, _python_env) =
+            crate::harness::prepare_script_for_isolation(python_script, "main")?;
+
+        // Create a buffer to redirect stdout for capturing the output
+        let mut buf = BufferRedirect::stdout().unwrap();
+        
+        // Create and boot the Environment
+        let mut runner = Environment::new("test_package", dir_path);
+        runner.boot_main()?;
+
+        // Execute the script in isolation
+        let process_uuid = runner.exec_isolated(&pickled_data, "test_stderr_script")?;
+
+        // Wait a moment for the process to execute and logs to be processed
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Communicate with the isolated process to get the result
+        let result = runner.communicate_isolated(&process_uuid)?;
+        
+        // Clean up first to ensure all output is generated
+        runner.stop_isolated(&process_uuid)?;
+        
+        // Verify we got the return value from the function
+        assert_eq!(
+            result,
+            Some("Function executed successfully".to_string()),
+            "Incorrect return value from isolated process"
+        );
+        
+        // Get the captured output
+        let mut output = String::new();
+        buf.read_to_string(&mut output).unwrap();
+        
+        // Drop the buffer to restore stdout
+        drop(buf);
+        
+        // This assertion should PASS because stdout is being properly captured
+        assert!(
+            output.contains("UNIQUE_STDOUT_OUTPUT_FOR_TESTING_67890"),
+            "Expected to find stdout message in the captured output"
+        );
+        
+        // This assertion should FAIL because stderr is not being properly captured
+        // When stderr capture is properly implemented, this test will pass
+        assert!(
+            output.contains("UNIQUE_STDERR_OUTPUT_FOR_TESTING_12345"),
+            "Failed to find stderr message in the captured output - stderr is not being properly captured"
+        );
+        
+        Ok(())
+    }
+}
