@@ -597,4 +597,94 @@ def main():
 
         Ok(())
     }
+
+    #[test]
+    fn test_debug_log_handling() -> Result<(), String> {
+        // Import gag for capturing stdout in tests
+        use gag::BufferRedirect;
+        use std::io::Read;
+
+        // Configure logging for this test
+        let _ = env_logger::builder()
+            .filter_level(log::LevelFilter::Debug)
+            .is_test(true)
+            .try_init();
+
+        // Create a temporary directory for our test
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path().to_str().unwrap();
+
+        // Create a Python script that uses logging at different levels
+        let python_script = r#"
+import logging
+
+def function_with_log_output():
+    # Configure logging - this will be captured by our Layer monitoring
+    logging.basicConfig(level=logging.DEBUG)
+    
+    # Log at different levels
+    logging.debug("UNIQUE_DEBUG_LOG_MESSAGE_12345")
+    logging.info("UNIQUE_INFO_LOG_MESSAGE_67890")
+    logging.warning("UNIQUE_WARNING_LOG_MESSAGE_54321")
+    
+    # Return success
+    return "Function executed with log messages"
+
+def main():
+    return function_with_log_output()
+        "#;
+
+        // Create a buffer to redirect stdout for capturing the output
+        let mut buf = BufferRedirect::stdout().unwrap();
+
+        // Prepare the script for isolation
+        let (pickled_data, _python_env) =
+            crate::harness::prepare_script_for_isolation(python_script, "main")?;
+
+        // Create and boot the Environment
+        let mut runner = Environment::new("test_package", dir_path);
+        runner.boot_main()?;
+
+        // Execute the script in isolation
+        let process_uuid = runner.exec_isolated(&pickled_data, "test_debug_logs")?;
+
+        // Wait a moment for the process to execute and logs to be processed
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Communicate with the isolated process to get the result
+        let result = runner.communicate_isolated(&process_uuid)?;
+        runner.stop_isolated(&process_uuid)?;
+
+        // Verify we got the return value from the function
+        assert_eq!(
+            result,
+            Some("Function executed with log messages".to_string()),
+            "Incorrect return value from isolated process"
+        );
+
+        // Get the captured output
+        let mut output = String::new();
+        buf.read_to_string(&mut output).unwrap();
+
+        // Drop the buffer to restore stdout
+        drop(buf);
+
+        // This assertion should PASS for all log levels now that we handle stdout/stderr properly
+        assert!(
+            output.contains("UNIQUE_DEBUG_LOG_MESSAGE_12345"),
+            "Failed to capture DEBUG log message"
+        );
+
+        assert!(
+            output.contains("UNIQUE_INFO_LOG_MESSAGE_67890"),
+            "Failed to capture INFO log message"
+        );
+
+        assert!(
+            output.contains("UNIQUE_WARNING_LOG_MESSAGE_54321"),
+            "Failed to capture WARNING log message"
+        );
+
+        Ok(())
+    }
 }

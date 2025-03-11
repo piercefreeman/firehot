@@ -1,81 +1,108 @@
-import io
-from unittest.mock import MagicMock
-
-import pytest
+import logging
+import sys
+from time import sleep
 
 from firehot.embedded.parent_entrypoint import MultiplexedStream
 
 
-@pytest.fixture
-def mock_stream():
-    """Fixture providing a StringIO mock stream for capturing output."""
-    return io.StringIO()
+def test_print_redirection(capfd):
+    """
+    Test that print() output is redirected and prefixed with [PID:<pid>:stdout].
+    """
+    with MultiplexedStream.setup_stream_redirection():
+        print("Hello stdout!")
+        sys.stdout.flush()
+        sleep(0.2)
+
+    captured = capfd.readouterr()
+    # Ensure that the printed text appears along with the redirection prefix.
+    assert "Hello stdout!" in captured.out
+    assert "[PID:" in captured.out
+    assert ":stdout]" in captured.out
 
 
-@pytest.fixture
-def multiplexed_stream(mock_stream):
-    """Fixture providing a MultiplexedStream with a fixed PID for testing."""
-    stream = MultiplexedStream(mock_stream, "test_stream")
-    # Set a fixed PID for testing
-    stream.pid = 12345
-    return stream
+def test_stderr_redirection(capfd):
+    """
+    Test that writing directly to sys.stderr is redirected and annotated with the correct prefix.
+    """
+    with MultiplexedStream.setup_stream_redirection():
+        sys.stderr.write("Hello stderr!\n")
+        sys.stderr.flush()
+        sleep(0.2)
+
+    captured = capfd.readouterr()
+    assert "Hello stderr!" in captured.err
+    assert "[PID:" in captured.err
+    assert ":stderr]" in captured.err
 
 
-def test_write_single_line(mock_stream, multiplexed_stream):
-    """Test writing a single line to the stream."""
-    # Write a single line to the stream
-    multiplexed_stream.write("Hello, world!")
+def test_logging_redirection(capfd):
+    """
+    Test that logging output is captured and prefixed as expected.
+    Note: Logging output is normally sent to stderr.
+    """
+    logger = logging.getLogger("test_logging")
+    logger.setLevel(logging.DEBUG)
+    # Clear any existing handlers.
+    logger.handlers.clear()
 
-    # Check the output has the correct prefix
-    expected = "[PID:12345:test_stream]Hello, world!\n"
-    assert mock_stream.getvalue() == expected
+    # Create the logging handler inside the redirection context so it uses the new sys.stderr.
+    with MultiplexedStream.setup_stream_redirection():
+        handler = logging.StreamHandler(sys.stderr)
+        logger.addHandler(handler)
+        logger.info("Logging test message")
+        sys.stderr.flush()
+        sleep(0.2)
+        logger.removeHandler(handler)
 
-
-def test_write_multiple_lines(mock_stream, multiplexed_stream):
-    """Test writing multiple lines to the stream."""
-    # Write multiple lines to the stream
-    multiplexed_stream.write("Line 1\nLine 2\nLine 3")
-
-    # Check the output has the correct prefix for each line
-    expected = (
-        "[PID:12345:test_stream]Line 1\n"
-        + "[PID:12345:test_stream]Line 2\n"
-        + "[PID:12345:test_stream]Line 3\n"
-    )
-    assert mock_stream.getvalue() == expected
-
-
-def test_write_empty_string(mock_stream, multiplexed_stream):
-    """Test writing an empty string."""
-    # Write an empty string
-    multiplexed_stream.write("")
-
-    # Should not write anything
-    assert mock_stream.getvalue() == ""
+    captured = capfd.readouterr()
+    combined_output = captured.out + captured.err
+    assert "Logging test message" in combined_output
+    assert "[PID:" in combined_output
 
 
-def test_flush():
-    """Test that flush is forwarded to the original stream."""
-    # Create a mock object that tracks calls
-    mock_stream = MagicMock()
-    stream = MultiplexedStream(mock_stream, "test_stream")
+def test_stream_restoration(capfd):
+    """
+    Test that after the context manager exits, sys.stdout and sys.stderr are restored,
+    and output printed outside the context does not have the redirection prefix.
+    """
+    with MultiplexedStream.setup_stream_redirection():
+        print("Inside redirection")
+        sys.stdout.flush()
+        sleep(0.2)
+        # Flush the captured output so that only new output is tested.
+        _ = capfd.readouterr()
 
-    # Call flush
-    stream.flush()
+    # After context exit, printing should produce unmodified output.
+    print("Outside redirection")
+    sys.stdout.flush()
+    captured_outside = capfd.readouterr()
+    assert "Outside redirection" in captured_outside.out
+    # The redirection prefix should not be present in output printed after the context.
+    assert "[PID:" not in captured_outside.out
 
-    # Verify flush was called on the original stream
-    mock_stream.flush.assert_called_once()
 
+def test_multiline_print_prefix(capfd):
+    """
+    Test that a print() call with multiple lines produces a redirection prefix on each line.
+    This is important because our third-party Rust reader reads until newline.
+    """
+    multiline_text = "Line one\nLine two\nLine three"
+    with MultiplexedStream.setup_stream_redirection():
+        print(multiline_text)
+        sys.stdout.flush()
+        sleep(0.2)
 
-def test_attribute_forwarding():
-    """Test that other attributes are forwarded to the original stream."""
-    # Create a mock object with a custom attribute
-    mock_stream = MagicMock()
-    mock_stream.custom_attr = "test_value"
-    stream = MultiplexedStream(mock_stream, "test_stream")
-
-    # Access the custom attribute
-    value = stream.custom_attr
-
-    # Verify we get the value from the original stream
-    assert value == "test_value"
+    captured = capfd.readouterr()
+    # Remove any trailing newline and split the output into lines.
+    lines = captured.out.strip().split("\n")
+    # Each non-empty line should be prefixed with [PID:<pid>:stdout]
+    expected_lines = ["Line one", "Line two", "Line three"]
+    assert len(lines) == len(expected_lines)
+    for line, expected in zip(lines, expected_lines, strict=False):
+        # Check that the line starts with the prefix.
+        assert line.startswith("[PID:")
+        assert ":stdout]" in line
+        # Extract the actual content after the prefix.
+        content = line.split("]")[-1]
+        assert content.strip() == expected
