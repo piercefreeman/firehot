@@ -113,3 +113,4 @@ jobs:
         FIREHOT_LOG_LEVEL: trace
       run: |
         make test-hotreload
+      timeout-minutes: 5

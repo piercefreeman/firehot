@@ -6,9 +6,14 @@ Intended for embeddable usage in Rust, can only import stdlib modules.
 
 """
 
+import errno
+import fcntl
 import logging
 import os
+import select
 import sys
+import threading
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from json import dumps as json_dumps
 from json import loads as json_loads
@@ -166,41 +171,151 @@ def read_message() -> MessageBase | None:
 # Logging
 #
 
+DEFAULT_DESCRIPTORS = {
+    "stdout": 1,
+    "stderr": 2,
+}
+
 
 class MultiplexedStream:
-    def __init__(self, original_stream, stream_name: str):
-        self.original_stream = original_stream
+    """
+    Redirects a file descriptor (stdout/stderr) to capture all output,
+    including output from the logging module that bypasses sys.stdout/stderr.
+    """
+
+    _instances: dict[str, "MultiplexedStream"] = {}
+
+    def __init__(self, stream_name: str):
         self.stream_name = stream_name
         self.pid = os.getpid()
+        self.original_fd = DEFAULT_DESCRIPTORS[stream_name]
+        self.read_fd = None
+        self.write_fd = None
+        self.original_fd_dup = None
+        self.monitor_thread = None
+        self.active = False
+        self._instances[stream_name] = self
 
-    def write(self, text: str) -> int:
-        # Add PID prefix to each line (newlines and lines with values)
-        prefix = f"[PID:{self.pid}:{self.stream_name}]"
-
-        text = text.strip()
-        if not text:
+    def start_redirection(self) -> None:
+        """Set up file descriptor redirection and monitoring thread."""
+        if self.active:
             return
 
-        prefixed_text = ""
-        lines = text.split("\n")
-        for line in lines:
-            prefixed_text += f"{prefix}{line}\n"
-        return self.original_stream.write(prefixed_text)
+        # Create a pipe
+        self.read_fd, self.write_fd = os.pipe()
 
-    def flush(self) -> None:
-        return self.original_stream.flush()
+        # Save original file descriptor
+        self.original_fd_dup = os.dup(self.original_fd)
 
-    # Forward all other attributes to the original stream
-    def __getattr__(self, attr):
-        return getattr(self.original_stream, attr)
+        # Replace the file descriptor
+        os.dup2(self.write_fd, self.original_fd)
+
+        # Set pipe to non-blocking mode
+        flags = fcntl.fcntl(self.read_fd, fcntl.F_GETFL)
+        fcntl.fcntl(self.read_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+        # Start monitoring thread
+        self.active = True
+        self.monitor_thread = threading.Thread(target=self._monitor_pipe, daemon=True)
+        self.monitor_thread.start()
+
+        # Update Python's sys.stdout/stderr to use new fd
+        # if self.stream_name == "stdout":
+        #    sys.stdout = os.fdopen(self.original_fd, "w", 1)  # line buffered
+        # else:
+        #    sys.stderr = os.fdopen(self.original_fd, "w", 1)  # line buffered
+
+        # This ensures that the file object used for sys.stdout (or sys.stderr) does
+        # not own (and eventually close) the original descriptor. We want to be in
+        # charge of that closure process.
+        if self.stream_name == "stdout":
+            sys.stdout = os.fdopen(os.dup(self.original_fd), "w", 1)  # line buffered
+        else:
+            sys.stderr = os.fdopen(os.dup(self.original_fd), "w", 1)  # line buffered
+
+    def _monitor_pipe(self) -> None:
+        """Monitor the pipe and format output with PID prefix."""
+        try:
+            while self.active:
+                # Wait for data with a timeout
+                ready, _, _ = select.select([self.read_fd], [], [], 0.1)
+                if not ready:
+                    continue
+
+                try:
+                    data = os.read(self.read_fd, 4096)
+                    if not data:  # EOF
+                        break
+
+                    # Format the data with PID and stream name
+                    formatted_data = b""
+                    for line in data.splitlines(True):  # Keep line endings
+                        if line.strip():  # Skip empty lines
+                            prefix = f"[PID:{self.pid}:{self.stream_name}]".encode()
+                            formatted_data += prefix + line
+
+                    # Write the formatted data to the original descriptor
+                    os.write(self.original_fd_dup, formatted_data)
+                except (IOError, OSError) as e:
+                    if e.errno != errno.EAGAIN:  # Not just a would-block error
+                        # Write error to original stdout for debugging
+                        error_msg = f"[ERROR] MultiplexedStream exception: {str(e)}\n".encode()
+                        os.write(self.original_fd_dup, error_msg)
+        finally:
+            # Only close the read_fd here; write_fd will be closed in stop_redirection
+            if self.read_fd is not None:
+                os.close(self.read_fd)
+                self.read_fd = None
+
+    def stop_redirection(self) -> None:
+        """Stop redirection and restore original file descriptors."""
+        if not self.active:
+            return
+
+        self.active = False
+
+        # Wait for monitor thread to finish
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            self.monitor_thread.join(timeout=1.0)
+
+        # Restore original file descriptor
+        if self.original_fd_dup is not None:
+            os.dup2(self.original_fd_dup, self.original_fd)
+            os.close(self.original_fd_dup)
+            self.original_fd_dup = None
+
+        # Close write fd
+        if self.write_fd is not None:
+            os.close(self.write_fd)
+            self.write_fd = None
+
+        # Restore Python stdout/stderr
+        if self.stream_name == "stdout":
+            sys.stdout = sys.__stdout__
+        else:
+            sys.stderr = sys.__stderr__
+
+    def __del__(self) -> None:
+        """Ensure resources are cleaned up."""
+        self.stop_redirection()
+
+    @classmethod
+    @contextmanager
+    def setup_stream_redirection(cls):
+        """Set up redirection for both stdout and stderr."""
+        stdout_stream = cls("stdout")
+        stderr_stream = cls("stderr")
+        stdout_stream.start_redirection()
+        stderr_stream.start_redirection()
+
+        try:
+            yield stdout_stream, stderr_stream
+        finally:
+            for instance in cls._instances.values():
+                instance.stop_redirection()
 
 
-#
-# Main Logic
-#
-
-
-def main():
+def build_firehot_logger():
     # This will be populated with dynamic import statements from Rust
     known_log_levels = {
         "TRACE": logging.DEBUG,
@@ -209,9 +324,22 @@ def main():
         "WARNING": logging.WARNING,
         "ERROR": logging.ERROR,
     }
-    dynamic_imports = sys.argv[1] if len(sys.argv) > 1 else ""
     log_level = known_log_levels.get(getenv("FIREHOT_LOG_LEVEL", "WARNING"), logging.WARNING)
-    logging.basicConfig(level=log_level)
+
+    logger = logging.getLogger("firehot")
+    logger.setLevel(log_level)
+
+    return logger
+
+
+#
+# Main Logic
+#
+
+
+def main():
+    dynamic_imports = sys.argv[1] if len(sys.argv) > 1 else ""
+    firehot_logger = build_firehot_logger()
 
     # Execute the dynamic imports
     try:
@@ -229,42 +357,34 @@ def main():
         pid = os.fork()
         if pid == 0:
             # Child process
-            try:
-                # Set up globals and locals for execution
-                exec_globals = globals().copy()
-                exec_locals = {}
 
-                # Immediately route stdout and stderr to a custom convention that specifies the
-                # current pid, so our rust watcher can separate them from the single stdout stream
-                # that's inherited from the parent environment
+            # Set up stream redirection to catch all output from the child process
+            with MultiplexedStream.setup_stream_redirection():
+                try:
+                    # Set up globals and locals for execution
+                    exec_globals = globals().copy()
+                    exec_locals = {}
 
-                # Save original stdout and stderr
-                original_stdout = sys.stdout
-                original_stderr = sys.stderr
+                    firehot_logger.info("Will execute code in forked process...")
+                    sys.stdout.flush()
 
-                # Replace with PID-prefixed versions
-                sys.stdout = MultiplexedStream(original_stdout, "stdout")
-                sys.stderr = MultiplexedStream(original_stderr, "stderr")
+                    # Execute the code
+                    exec(code_to_execute, exec_globals, exec_locals)
 
-                logging.info("Will execute code in forked process...")
-                sys.stdout.flush()
+                    firehot_logger.info("Executed code in forked process")
+                    sys.stdout.flush()
 
-                # Execute the code
-                exec(code_to_execute, exec_globals, exec_locals)
+                    # By convention, the result is stored in the 'result' variable
+                    if "result" in exec_locals:
+                        write_message(ChildComplete(result=str(exec_locals["result"])))
+                    else:
+                        write_message(ChildComplete(result=None))
 
-                logging.info("Executed code in forked process")
-                sys.stdout.flush()
-
-                # By convention, the result is stored in the 'result' variable
-                if "result" in exec_locals:
-                    write_message(ChildComplete(result=str(exec_locals["result"])))
-                else:
-                    write_message(ChildComplete(result=None))
-            except Exception as e:
-                write_message(ChildError(error=str(e), traceback=format_exc()))
-            finally:
-                # Exit the child process
-                sys.exit(0)
+                    sys.exit(0)
+                except Exception as e:
+                    # Report the error
+                    write_message(ChildError(error=str(e), traceback=format_exc()))
+                    sys.exit(1)
         else:
             # Parent process. The PID will represent the child process.
             return pid
@@ -287,7 +407,7 @@ def main():
                     )
                 )
             elif isinstance(command, ExitRequest):
-                logging.info("Exiting loader process")
+                firehot_logger.info("Exiting loader process")
                 sys.stdout.flush()
                 break
             else:

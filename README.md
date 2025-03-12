@@ -2,7 +2,7 @@
 
 ![Firehot](https://raw.githubusercontent.com/piercefreeman/firehot/main/media/header.png)
 
-A package to quickly hot reload large Python projects. Currently in development.
+A package to quickly hot reload large Python projects. Currently for Linux & OSX.
 
 ## Background
 

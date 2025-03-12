@@ -26,6 +26,7 @@ pub struct Environment {
     pub ast_manager: ProjectAstManager,   // Project AST manager for this environment
 
     first_scan: bool,
+    test_mode: bool, // Whether to run in test mode (buffer output instead of printing)
 }
 
 impl Environment {
@@ -39,6 +40,41 @@ impl Environment {
             layer: None,
             ast_manager,
             first_scan: false,
+            test_mode: false,
+        }
+    }
+
+    /// Create a new Environment in test mode (buffers output instead of printing)
+    pub fn new_for_test(project_name: &str, project_path: &str) -> Self {
+        // Create a new AST manager for this project
+        let ast_manager = ProjectAstManager::new(project_name, project_path);
+        info!("Created AST manager for project: {}", project_name);
+
+        Self {
+            id: Uuid::new_v4().to_string(),
+            layer: None,
+            ast_manager,
+            first_scan: false,
+            test_mode: true,
+        }
+    }
+
+    /// Get the buffered output from the layer (if in test mode)
+    pub fn get_layer_output(&self) -> Option<String> {
+        if let Some(layer_arc) = &self.layer {
+            if let Ok(layer_guard) = layer_arc.lock() {
+                return layer_guard.get_buffered_output();
+            }
+        }
+        None
+    }
+
+    /// Clear the buffered output from the layer (if in test mode)
+    pub fn clear_layer_output(&self) {
+        if let Some(layer_arc) = &self.layer {
+            if let Ok(layer_guard) = layer_arc.lock() {
+                layer_guard.clear_buffered_output();
+            }
         }
     }
 
@@ -76,8 +112,18 @@ impl Environment {
             .take()
             .ok_or_else(|| "Failed to capture stdout for python process".to_string())?;
 
+        // Also capture stderr
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "Failed to capture stderr for python process".to_string())?;
+
         let reader = BufReader::new(stdout);
         let mut lines_iter = reader.lines();
+
+        // Create a stderr reader
+        let stderr_reader = BufReader::new(stderr);
+        let stderr_lines_iter = stderr_reader.lines();
 
         // Wait for the ImportComplete message
         info!("Waiting for import completion...");
@@ -144,12 +190,18 @@ impl Environment {
             format!("with ID: {}", self.id).white().bold()
         );
 
-        // Create the environment
-        let mut layer = Layer::new(child, stdin, lines_iter);
+        let mut layer = if self.test_mode {
+            // Use the test mode constructor
+            Layer::new_for_test(child, stdin, lines_iter, stderr_lines_iter)
+        } else {
+            // Use the standard constructor
+            Layer::new(child, stdin, lines_iter, stderr_lines_iter)
+        };
 
         // Start the monitor thread
         layer.start_monitor_thread();
 
+        // Store the layer in the environment
         self.layer = Some(Arc::new(Mutex::new(layer)));
 
         Ok(())
@@ -697,7 +749,7 @@ def main():
 
         // Prepare the script for isolation
         let (pickled_data, python_env) =
-            crate::harness::prepare_script_for_isolation(python_script, "main")
+            crate::test_utils::harness::prepare_script_for_isolation(python_script, "main")
                 .expect("Failed to prepare script for isolation");
 
         let mut runner = Environment::new("test_package", &python_env.container_path);
@@ -868,7 +920,7 @@ def main():
 
         // Prepare the script for isolation
         let (pickled_data, _python_env) =
-            crate::harness::prepare_script_for_isolation(python_script, "main")?;
+            crate::test_utils::harness::prepare_script_for_isolation(python_script, "main")?;
 
         // Create and boot the Environment
         let mut runner = Environment::new("test_package", dir_path);
@@ -924,10 +976,9 @@ def main():
     return "Long running process completed"
         "#;
 
-        // Prepare the scripts for isolation
-        // Keep the python_env in scope for the duration of the test
+        // Prepare the script for isolation
         let (pickled_long_running, python_env) =
-            crate::harness::prepare_script_for_isolation(python_long_running, "main")
+            crate::test_utils::harness::prepare_script_for_isolation(python_long_running, "main")
                 .expect("Failed to prepare long-running script for isolation");
 
         // Create and boot environment
