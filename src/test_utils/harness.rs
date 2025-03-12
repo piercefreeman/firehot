@@ -13,9 +13,6 @@ use uuid::Uuid;
 
 use std::env;
 
-// Use the environment module from the main crate
-use crate::environment;
-
 /// Python env guard that restores the original PYTHONPATH when dropped
 pub struct PythonPathGuard {
     pub module_name: String,
@@ -207,9 +204,9 @@ print(pickled_data)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::environment::Environment;
     use base64;
     use base64::Engine;
-    use crate::environment::Environment;
 
     #[test]
     fn test_prepare_script_for_isolation() -> Result<(), String> {

@@ -13,11 +13,11 @@ use uuid::Uuid;
 pub mod ast;
 pub mod async_resolve;
 pub mod environment;
-pub mod test_utils;
 pub mod layer;
 pub mod messages;
 pub mod multiplex_logs;
 pub mod scripts;
+pub mod test_utils;
 
 // Export types from messages and scripts for public use
 pub use messages::{ExitRequest, ForkRequest, Message};

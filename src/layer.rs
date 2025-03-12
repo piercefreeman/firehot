@@ -13,6 +13,30 @@ use crate::async_resolve::AsyncResolve;
 use crate::messages::Message;
 use crate::multiplex_logs::parse_multiplexed_line;
 
+/// Buffer for capturing logs in test mode
+#[derive(Clone, Debug, Default)]
+pub struct OutputBuffer {
+    pub lines: Vec<String>,
+}
+
+impl OutputBuffer {
+    pub fn new() -> Self {
+        Self { lines: Vec::new() }
+    }
+
+    pub fn add_line(&mut self, line: String) {
+        self.lines.push(line);
+    }
+
+    pub fn get_content(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    pub fn clear(&mut self) {
+        self.lines.clear();
+    }
+}
+
 /// Result from the initial fork
 #[derive(Debug, Clone)]
 pub enum ForkResult {
@@ -53,6 +77,11 @@ pub struct Layer {
     pub stderr_thread: Option<JoinHandle<()>>, // Thread handle for stderr monitoring
     pub thread_terminate_tx: Arc<Mutex<Option<Sender<()>>>>, // Channel to signal thread termination
     pub stderr_terminate_tx: Arc<Mutex<Option<Sender<()>>>>, // Channel to signal stderr thread termination
+
+    // Output buffer for tests
+    pub output_buffer: Arc<Mutex<Option<OutputBuffer>>>,
+    // Flag to control whether output is printed or buffered
+    pub buffer_output: bool,
 }
 
 impl Layer {
@@ -76,11 +105,63 @@ impl Layer {
             stderr_thread: None,
             thread_terminate_tx: Arc::new(Mutex::new(None)),
             stderr_terminate_tx: Arc::new(Mutex::new(None)),
+            output_buffer: Arc::new(Mutex::new(None)),
+            buffer_output: false,
+        }
+    }
+
+    // New constructor with test mode enabled
+    pub fn new_for_test(
+        child: Child,
+        stdin: std::process::ChildStdin,
+        reader: std::io::Lines<BufReader<std::process::ChildStdout>>,
+        stderr_reader: std::io::Lines<BufReader<std::process::ChildStderr>>,
+    ) -> Self {
+        let mut layer = Self::new(child, stdin, reader, stderr_reader);
+        layer.buffer_output = true;
+        layer.output_buffer = Arc::new(Mutex::new(Some(OutputBuffer::new())));
+        layer
+    }
+
+    // Get the buffered output as a string
+    pub fn get_buffered_output(&self) -> Option<String> {
+        if let Ok(buffer_guard) = self.output_buffer.lock() {
+            if let Some(buffer) = &*buffer_guard {
+                return Some(buffer.get_content());
+            }
+        }
+        None
+    }
+
+    // Clear the buffered output
+    pub fn clear_buffered_output(&self) {
+        if let Ok(mut buffer_guard) = self.output_buffer.lock() {
+            if let Some(buffer) = &mut *buffer_guard {
+                buffer.clear();
+            }
+        }
+    }
+
+    /// Helper function to output a line either to stdout or the buffer based on buffer_output setting
+    fn output_line(
+        buffer_output: bool,
+        output_buffer: &Arc<Mutex<Option<OutputBuffer>>>,
+        line: String,
+    ) {
+        if buffer_output {
+            // Write to buffer if buffer_output is true
+            if let Ok(mut buffer_guard) = output_buffer.lock() {
+                if let Some(buffer) = &mut *buffer_guard {
+                    buffer.add_line(line);
+                }
+            }
+        } else {
+            // Print to stdout (default behavior)
+            println!("{}", line);
         }
     }
 
     /// Start monitoring threads that concurrently read from the child process stdout and stderr
-    /// to avoid blocking if one stream has no content while the other does
     pub fn start_monitor_thread(&mut self) {
         // Create channels for signaling thread termination
         let (stdout_terminate_tx, stdout_terminate_rx) = mpsc::channel();
@@ -107,11 +188,15 @@ impl Layer {
         let completion_resolvers_stdout = Arc::clone(&self.completion_resolvers);
         let forked_processes_stdout = Arc::clone(&self.forked_processes);
         let forked_names_stdout = Arc::clone(&self.forked_names);
+        let output_buffer_stdout = Arc::clone(&self.output_buffer);
+        let buffer_output_stdout = self.buffer_output;
 
         let fork_resolvers_stderr = Arc::clone(&self.fork_resolvers);
         let completion_resolvers_stderr = Arc::clone(&self.completion_resolvers);
         let forked_processes_stderr = Arc::clone(&self.forked_processes);
         let forked_names_stderr = Arc::clone(&self.forked_names);
+        let output_buffer_stderr = Arc::clone(&self.output_buffer);
+        let buffer_output_stderr = self.buffer_output;
 
         // Start a separate thread for stderr monitoring
         let stderr_thread = thread::spawn(move || {
@@ -124,6 +209,8 @@ impl Layer {
                 &forked_processes_stderr,
                 &forked_names_stderr,
                 None, // No need to send termination to other threads
+                buffer_output_stderr,
+                &output_buffer_stderr,
             );
         });
 
@@ -141,6 +228,8 @@ impl Layer {
                 &forked_processes_stdout,
                 &forked_names_stdout,
                 Some(stderr_terminate_tx), // Ability to terminate stderr thread
+                buffer_output_stdout,
+                &output_buffer_stdout,
             );
 
             info!("Stdout monitor thread exiting");
@@ -161,6 +250,8 @@ impl Layer {
         forked_processes: &Arc<Mutex<HashMap<String, i32>>>,
         forked_names: &Arc<Mutex<HashMap<String, String>>>,
         stderr_terminate_tx: Option<mpsc::Sender<()>>,
+        buffer_output: bool,
+        output_buffer: &Arc<Mutex<Option<OutputBuffer>>>,
     ) {
         info!("Monitor thread for {} started", stream_name);
         let mut reader = reader;
@@ -185,6 +276,8 @@ impl Layer {
                         completion_resolvers,
                         forked_processes,
                         forked_names,
+                        buffer_output,
+                        output_buffer,
                     );
                 }
                 Some(Err(e)) => {
@@ -213,13 +306,15 @@ impl Layer {
         info!("{} monitor thread exiting", stream_name);
     }
 
-    /// Helper function to process an output line from either stdout or stderr
+    /// Process output line from either stdout or stderr
     fn process_output_line(
         line: &str,
         fork_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ForkResult>>>>,
         completion_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ProcessResult>>>>,
         forked_processes: &Arc<Mutex<HashMap<String, i32>>>,
         forked_names: &Arc<Mutex<HashMap<String, String>>>,
+        buffer_output: bool,
+        output_buffer: &Arc<Mutex<Option<OutputBuffer>>>,
     ) {
         // All lines streamed from the forked process (even our own messages)
         // should be multiplexed lines
@@ -256,7 +351,7 @@ impl Layer {
                         Err(_e) => {
                             // Expected error condition in the case that we didn't receive a message
                             // but instead standard stdout
-                            println!(
+                            let output_line = format!(
                                 "[{}]: {}",
                                 process_name
                                     .unwrap_or(&String::from("unknown"))
@@ -264,17 +359,23 @@ impl Layer {
                                     .bold(),
                                 log_line.content
                             );
+
+                            // Use the buffering mechanism
+                            Self::output_line(buffer_output, output_buffer, output_line);
                         }
                     }
                 } else {
                     // If we can't match it to a specific process, log it with PID
-                    println!(
+                    let output_line = format!(
                         "Unmatched log: [{}] {}",
                         format!("{}:{}", log_line.pid, log_line.stream_name)
                             .cyan()
                             .bold(),
                         log_line.content
                     );
+
+                    // Use the buffering mechanism
+                    Self::output_line(buffer_output, output_buffer, output_line);
                 }
             }
             Err(_e) => {
@@ -518,10 +619,6 @@ mod tests {
 
     #[test]
     fn test_stderr_handling() -> Result<(), String> {
-        // Import our custom RedirectLogs for capturing stdout in tests
-        use crate::test_utils::redirect::RedirectLogs;
-        use std::io::Read;
-
         // Create a temporary directory for our test
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
@@ -545,15 +642,12 @@ def main():
     return function_with_stderr_output()
         "#;
 
-        // Create a RedirectLogs to capture stdout
-        let redirection = RedirectLogs::new().expect("Failed to redirect stdout");
-
         // Prepare the script for isolation
         let (pickled_data, _python_env) =
             crate::test_utils::harness::prepare_script_for_isolation(python_script, "main")?;
 
         // Create and boot the Environment
-        let mut runner = Environment::new("test_package", dir_path);
+        let mut runner = Environment::new_for_test("test_package", dir_path);
         runner.boot_main()?;
 
         // Execute the script in isolation
@@ -575,9 +669,8 @@ def main():
             "Incorrect return value from isolated process"
         );
 
-        // Finalize the redirection to get the captured output
-        let output_bytes = redirection.finish().expect("Failed to finish redirection");
-        let output = String::from_utf8(output_bytes).expect("Invalid UTF-8 in captured output");
+        // Get the buffered output from the layer
+        let output = runner.get_layer_output().unwrap_or_default();
 
         // This assertion should PASS because stdout is being properly captured
         assert!(
@@ -585,7 +678,7 @@ def main():
             "Expected to find stdout message in the captured output"
         );
 
-        // This assertion should now PASS because stderr should also be captured by our RedirectLogs implementation
+        // This assertion should now PASS because stderr should also be captured by our buffer
         assert!(
             output.contains("UNIQUE_STDERR_OUTPUT_FOR_TESTING_12345"),
             "Failed to find stderr message in the captured output"
@@ -596,10 +689,6 @@ def main():
 
     #[test]
     fn test_debug_log_handling() -> Result<(), String> {
-        // Import our custom RedirectLogs for capturing stdout in tests
-        use crate::test_utils::redirect::RedirectLogs;
-        use std::io::Read;
-
         // Configure logging for this test
         let _ = env_logger::builder()
             .filter_level(log::LevelFilter::Debug)
@@ -630,15 +719,12 @@ def main():
     return function_with_log_output()
         "#;
 
-        // Create a RedirectLogs to capture stdout
-        let redirection = RedirectLogs::new().expect("Failed to redirect stdout");
-
         // Prepare the script for isolation
         let (pickled_data, _python_env) =
             crate::test_utils::harness::prepare_script_for_isolation(python_script, "main")?;
 
         // Create and boot the Environment
-        let mut runner = Environment::new("test_package", dir_path);
+        let mut runner = Environment::new_for_test("test_package", dir_path);
         runner.boot_main()?;
 
         // Execute the script in isolation
@@ -658,9 +744,8 @@ def main():
             "Incorrect return value from isolated process"
         );
 
-        // Finalize the redirection to get the captured output
-        let output_bytes = redirection.finish().expect("Failed to finish redirection");
-        let output = String::from_utf8(output_bytes).expect("Invalid UTF-8 in captured output");
+        // Get the buffered output
+        let output = runner.get_layer_output().unwrap_or_default();
 
         // Check that all log levels were captured properly
         assert!(
