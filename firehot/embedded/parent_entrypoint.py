@@ -19,10 +19,11 @@ from json import dumps as json_dumps
 from json import loads as json_loads
 from json.decoder import JSONDecodeError
 from os import getenv
+from sys import _current_frames
 from time import sleep
 from traceback import format_exc, format_stack
-from sys import _current_frames
-from firehot import get_total_thread_count
+
+from firehot.firehot import get_total_thread_count
 
 try:
     from enum import StrEnum
@@ -346,14 +347,15 @@ def check_thread_safety() -> None:
     https://blog.phusion.nl/2017/10/13/why-ruby-app-servers-break-on-macos-high-sierra-and-what-can-be-done-about-it/
 
     """
+    firehot_logger = build_firehot_logger()
+
     # Get the total thread count from our Rust implementation
     # This will catch ALL threads, including those spawned by C extensions
     total_thread_count = get_total_thread_count()
-    
+
     if total_thread_count == 1:
         return
 
-    firehot_logger = build_firehot_logger()
     firehot_logger.warning(
         f"WARNING: Detected {total_thread_count} active threads before fork() "
         f"({threading.active_count()} Python threads, {total_thread_count - threading.active_count()} C/native threads). "
@@ -365,7 +367,7 @@ def check_thread_safety() -> None:
 
     # Get stack traces for all Python threads
     thread_frames = _current_frames()
-    
+
     # Log details about each Python thread
     for thread in threading.enumerate():
         thread_id = thread.ident
