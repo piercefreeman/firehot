@@ -20,7 +20,9 @@ from json import loads as json_loads
 from json.decoder import JSONDecodeError
 from os import getenv
 from time import sleep
-from traceback import format_exc
+from traceback import format_exc, format_stack
+from sys import _current_frames
+from firehot import get_total_thread_count
 
 try:
     from enum import StrEnum
@@ -344,48 +346,56 @@ def check_thread_safety() -> None:
     https://blog.phusion.nl/2017/10/13/why-ruby-app-servers-break-on-macos-high-sierra-and-what-can-be-done-about-it/
 
     """
-    import threading
-    import traceback
-    from sys import _current_frames
+    # Get the total thread count from our Rust implementation
+    # This will catch ALL threads, including those spawned by C extensions
+    total_thread_count = get_total_thread_count()
+    
+    if total_thread_count == 1:
+        return
 
-    active_threads = threading.enumerate()
-    thread_count = len(active_threads)
+    firehot_logger = build_firehot_logger()
+    firehot_logger.warning(
+        f"WARNING: Detected {total_thread_count} active threads before fork() "
+        f"({threading.active_count()} Python threads, {total_thread_count - threading.active_count()} C/native threads). "
+        "Forking a process with multiple threads can lead to deadlocks and "
+        "memory corruption, especially on macOS. Any threads besides the main "
+        "thread will be terminated in the child process, potentially leaving "
+        "shared resources in an inconsistent state."
+    )
 
-    if thread_count > 1:
-        firehot_logger = build_firehot_logger()
+    # Get stack traces for all Python threads
+    thread_frames = _current_frames()
+    
+    # Log details about each Python thread
+    for thread in threading.enumerate():
+        thread_id = thread.ident
+        if thread_id in thread_frames:
+            stack = "".join(format_stack(thread_frames[thread_id]))
+            firehot_logger.warning(
+                f"\nPython Thread Details:\n"
+                f"  Name: {thread.name}\n"
+                f"  ID: {thread_id}\n"
+                f"  Daemon: {thread.daemon}\n"
+                f"  Alive: {thread.is_alive()}\n"
+                f"  Stack Trace:\n{stack}"
+            )
+        else:
+            firehot_logger.warning(
+                f"\nPython Thread Details:\n"
+                f"  Name: {thread.name}\n"
+                f"  ID: {thread_id}\n"
+                f"  Daemon: {thread.daemon}\n"
+                f"  Alive: {thread.is_alive()}\n"
+                f"  Stack Trace: Unable to retrieve"
+            )
+
+    if total_thread_count > threading.active_count():
         firehot_logger.warning(
-            f"WARNING: Detected {thread_count} active threads before fork(). "
-            "Forking a process with multiple threads can lead to deadlocks and "
-            "memory corruption, especially on macOS. Any threads besides the main "
-            "thread will be terminated in the child process, potentially leaving "
-            "shared resources in an inconsistent state."
+            f"\nWARNING: Detected {total_thread_count - threading.active_count()} "
+            "threads that were created outside of Python (likely from C extensions). "
+            "These threads cannot be inspected from Python but may still cause "
+            "issues during fork()."
         )
-
-        # Get stack traces for all threads
-        thread_frames = _current_frames()
-
-        # Log details about each thread
-        for thread in active_threads:
-            thread_id = thread.ident
-            if thread_id in thread_frames:
-                stack = "".join(traceback.format_stack(thread_frames[thread_id]))
-                firehot_logger.warning(
-                    f"\nThread Details:\n"
-                    f"  Name: {thread.name}\n"
-                    f"  ID: {thread_id}\n"
-                    f"  Daemon: {thread.daemon}\n"
-                    f"  Alive: {thread.is_alive()}\n"
-                    f"  Stack Trace:\n{stack}"
-                )
-            else:
-                firehot_logger.warning(
-                    f"\nThread Details:\n"
-                    f"  Name: {thread.name}\n"
-                    f"  ID: {thread_id}\n"
-                    f"  Daemon: {thread.daemon}\n"
-                    f"  Alive: {thread.is_alive()}\n"
-                    f"  Stack Trace: Unable to retrieve"
-                )
 
 
 #
