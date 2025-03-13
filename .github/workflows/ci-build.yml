@@ -66,6 +66,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
+      # Even cargo tests need python/the lib built and installed, so our
+      # embedded scripts can reference rust functions.
       - name: Install library
         run: uv run maturin develop --uv
 
