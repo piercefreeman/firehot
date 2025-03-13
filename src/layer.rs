@@ -389,7 +389,8 @@ impl Layer {
                     forked_processes,
                     forked_names,
                 ) {
-                    error!("Error handling log format: {}", line);
+                    // Unable to parse the line as a message, so log it as a raw line
+                    error!("{}", line);
                 }
             }
         }

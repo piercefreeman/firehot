@@ -222,12 +222,6 @@ class MultiplexedStream:
         self.monitor_thread = threading.Thread(target=self._monitor_pipe, daemon=True)
         self.monitor_thread.start()
 
-        # Update Python's sys.stdout/stderr to use new fd
-        # if self.stream_name == "stdout":
-        #    sys.stdout = os.fdopen(self.original_fd, "w", 1)  # line buffered
-        # else:
-        #    sys.stderr = os.fdopen(self.original_fd, "w", 1)  # line buffered
-
         # This ensures that the file object used for sys.stdout (or sys.stderr) does
         # not own (and eventually close) the original descriptor. We want to be in
         # charge of that closure process.
@@ -379,7 +373,7 @@ def check_thread_safety() -> None:
                 f"  ID: {thread_id}\n"
                 f"  Daemon: {thread.daemon}\n"
                 f"  Alive: {thread.is_alive()}\n"
-                f"  Stack Trace:\n{stack}"
+                f"  Stack Trace:\n{stack.rstrip()}"
             )
         else:
             firehot_logger.warning(
@@ -430,6 +424,8 @@ def main():
             # Child process
 
             # Set up stream redirection to catch all output from the child process
+            # NOTE: We can't run this before the child process has launched, since it spawns
+            # a thread that will affect our fork() behavior.
             with MultiplexedStream.setup_stream_redirection():
                 try:
                     # Set up globals and locals for execution
