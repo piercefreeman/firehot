@@ -108,7 +108,7 @@ mod tests {
             .map(|_| {
                 thread::spawn(|| {
                     // Sleep to ensure we can count it
-                    thread::sleep(std::time::Duration::from_millis(100));
+                    thread::sleep(std::time::Duration::from_millis(500));
                 })
             })
             .collect();
