@@ -332,6 +332,62 @@ def build_firehot_logger():
     return logger
 
 
+def check_thread_safety() -> None:
+    """
+    Check if we're running with multiple threads and warn about potential fork() dangers.
+    This is especially important on macOS where fork() behavior with multiple threads
+    can lead to deadlocks and other issues.
+
+    More reading:
+    https://stackoverflow.com/questions/50168647/multiprocessing-causes-python-to-crash-and-gives-an-error-may-have-been-in-progr
+    https://github.com/ansible/ansible/issues/32499
+    https://blog.phusion.nl/2017/10/13/why-ruby-app-servers-break-on-macos-high-sierra-and-what-can-be-done-about-it/
+
+    """
+    import threading
+    import traceback
+    from sys import _current_frames
+
+    active_threads = threading.enumerate()
+    thread_count = len(active_threads)
+
+    if thread_count > 1:
+        firehot_logger = build_firehot_logger()
+        firehot_logger.warning(
+            f"WARNING: Detected {thread_count} active threads before fork(). "
+            "Forking a process with multiple threads can lead to deadlocks and "
+            "memory corruption, especially on macOS. Any threads besides the main "
+            "thread will be terminated in the child process, potentially leaving "
+            "shared resources in an inconsistent state."
+        )
+
+        # Get stack traces for all threads
+        thread_frames = _current_frames()
+
+        # Log details about each thread
+        for thread in active_threads:
+            thread_id = thread.ident
+            if thread_id in thread_frames:
+                stack = "".join(traceback.format_stack(thread_frames[thread_id]))
+                firehot_logger.warning(
+                    f"\nThread Details:\n"
+                    f"  Name: {thread.name}\n"
+                    f"  ID: {thread_id}\n"
+                    f"  Daemon: {thread.daemon}\n"
+                    f"  Alive: {thread.is_alive()}\n"
+                    f"  Stack Trace:\n{stack}"
+                )
+            else:
+                firehot_logger.warning(
+                    f"\nThread Details:\n"
+                    f"  Name: {thread.name}\n"
+                    f"  ID: {thread_id}\n"
+                    f"  Daemon: {thread.daemon}\n"
+                    f"  Alive: {thread.is_alive()}\n"
+                    f"  Stack Trace: Unable to retrieve"
+                )
+
+
 #
 # Main Logic
 #
@@ -354,6 +410,9 @@ def main():
 
     # Function to handle forking and executing code
     def handle_fork_request(code_to_execute):
+        # Check thread safety before forking
+        check_thread_safety()
+
         pid = os.fork()
         if pid == 0:
             # Child process
