@@ -16,6 +16,7 @@ pub mod environment;
 pub mod layer;
 pub mod messages;
 pub mod multiplex_logs;
+pub mod process;
 pub mod scripts;
 pub mod test_utils;
 
@@ -76,6 +77,8 @@ fn firehot(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(exec_isolated, m)?)?;
     m.add_function(wrap_pyfunction!(communicate_isolated, m)?)?;
     m.add_function(wrap_pyfunction!(stop_isolated, m)?)?;
+
+    m.add_function(wrap_pyfunction!(get_total_thread_count, m)?)?;
 
     info!("firehot module initialization complete");
     Ok(())
@@ -277,4 +280,10 @@ fn communicate_isolated(_py: Python, env_id: &str, process_uuid: &str) -> PyResu
         error!("{}", err_msg);
         Err(PyRuntimeError::new_err(err_msg))
     }
+}
+
+#[pyfunction]
+fn get_total_thread_count() -> PyResult<u32> {
+    process::get_total_thread_count()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
 }
