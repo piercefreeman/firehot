@@ -1,5 +1,5 @@
 [project]
-name = "mypackage"
+name = "demopackage"
 version = "0.1.0"
 description = "An example package showing how to use firehot"
 readme = "README.md"
@@ -20,7 +20,7 @@ dev = [
 ]
 
 [project.scripts]
-test-hotreload = "mypackage.test_hotreload:main"
+test-hotreload = "demopackage.test_hotreload:main"
 
 [tool.uv.sources]
 external_package = { path = "./external-package", editable = true }
@@ -29,7 +29,7 @@ firehot = { path = "../target/wheels/firehot-0.1.0-cp312-cp312-macosx_11_0_arm64
 
 
 [tool.hatch.build.targets.wheel]
-packages = ["mypackage"]
+packages = ["demopackage"]
 
 [build-system]
 requires = ["hatchling"]

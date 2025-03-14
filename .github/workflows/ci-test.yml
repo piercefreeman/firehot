@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: ['hotreload', 'mypackage', 'external']
+        package: ['hotreload', 'demopackage', 'external']
     
     steps:
     - uses: actions/checkout@v3
@@ -63,13 +63,13 @@ jobs:
       if: matrix.package == 'hotreload'
       run: make ci-lint-hotreload
         
-    - name: Install mypackage dependencies & run lint
-      if: matrix.package == 'mypackage'
+    - name: Install demopackage dependencies & run lint
+      if: matrix.package == 'demopackage'
       # Our explicit uv add is necessary to override our locally set wheel. We should remove this
       # once we have a way to update the built executable locally.
       run: |
-        (cd mypackage && uv add ..)
-        make ci-lint-mypackage
+        (cd demopackage && uv add ..)
+        make ci-lint-demopackage
         
     - name: Install external dependencies & run lint
       if: matrix.package == 'external'
