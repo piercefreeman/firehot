@@ -1,13 +1,13 @@
-.PHONY: lint lint-ruff lint-pyright lint-hotreload lint-mypackage lint-external ci-lint ci-lint-ruff ci-lint-pyright ci-lint-hotreload ci-lint-mypackage ci-lint-external test-hotreload build-develop lint-rust ci-lint-rust
+.PHONY: lint lint-ruff lint-pyright lint-hotreload lint-demopackage lint-external ci-lint ci-lint-ruff ci-lint-pyright ci-lint-hotreload ci-lint-demopackage ci-lint-external test-hotreload build-develop lint-rust ci-lint-rust
 
 # Default target
 all: lint
 
 # Package directories
 ROOT_DIR := ./firehot/
-MYPACKAGE_DIR := ./mypackage/mypackage/
-EXTERNAL_DIR := ./mypackage/external-package/
-PKG_DIRS := $(ROOT_DIR) $(MYPACKAGE_DIR) $(EXTERNAL_DIR)
+DEMOPACKAGE_DIR := ./demopackage/demopackage/
+EXTERNAL_DIR := ./demopackage/external-package/
+PKG_DIRS := $(ROOT_DIR) $(DEMOPACKAGE_DIR) $(EXTERNAL_DIR)
 RUST_DIR := ./src/
 
 # Define a function to run pyright on a specific directory
@@ -67,7 +67,7 @@ define lint_directory
 endef
 
 # Main lint target that runs all linting tools on all packages
-lint: lint-hotreload lint-mypackage lint-external
+lint: lint-hotreload lint-demopackage lint-external
 
 # Package-specific lint targets
 lint-hotreload:
@@ -75,9 +75,9 @@ lint-hotreload:
 	$(call lint_directory,$(ROOT_DIR))
 	$(call lint_rust,$(RUST_DIR))
 
-lint-mypackage:
-	@echo "=== Linting mypackage package ==="
-	$(call lint_directory,$(MYPACKAGE_DIR))
+lint-demopackage:
+	@echo "=== Linting demopackage package ==="
+	$(call lint_directory,$(DEMOPACKAGE_DIR))
 
 lint-external:
 	@echo "=== Linting external package ==="
@@ -141,7 +141,7 @@ define lint_directory_ci
 endef
 
 # CI lint target that runs all linting tools on all packages (no fixes)
-ci-lint: ci-lint-hotreload ci-lint-mypackage ci-lint-external
+ci-lint: ci-lint-hotreload ci-lint-demopackage ci-lint-external
 
 # Package-specific CI lint targets (no fixes)
 ci-lint-hotreload:
@@ -149,9 +149,9 @@ ci-lint-hotreload:
 	$(call lint_directory_ci,$(ROOT_DIR))
 	$(call lint_rust_ci,$(RUST_DIR))
 
-ci-lint-mypackage:
-	@echo "=== CI Linting mypackage package (validation only) ==="
-	$(call lint_directory_ci,$(MYPACKAGE_DIR))
+ci-lint-demopackage:
+	@echo "=== CI Linting demopackage package (validation only) ==="
+	$(call lint_directory_ci,$(DEMOPACKAGE_DIR))
 
 ci-lint-external:
 	@echo "=== CI Linting external package (validation only) ==="
@@ -185,8 +185,8 @@ test-hotreload:
 
 # Development build target
 build-develop:
-	@echo "=== Building development version for mypackage ==="
-	cd mypackage && \
+	@echo "=== Building development version for demopackage ==="
+	cd demopackage && \
 	(cd .. && uv run maturin build $(MATURIN_ARGS)) && \
 	rm -f uv.lock && \
 	uv sync
@@ -198,7 +198,7 @@ help:
 	@echo " "
 	@echo "  lint            - Run all linters on all packages (with fixes)"
 	@echo "  lint-hotreload  - Run all linters on the root package only (with fixes)"
-	@echo "  lint-mypackage  - Run all linters on mypackage only (with fixes)"
+	@echo "  lint-demopackage  - Run all linters on demopackage only (with fixes)"
 	@echo "  lint-external   - Run all linters on external-package only (with fixes)"
 	@echo "  lint-ruff       - Run ruff linter only (all packages, with fixes)"
 	@echo "  lint-pyright    - Run pyright type checker only (all packages)"
@@ -206,11 +206,11 @@ help:
 	@echo " "
 	@echo "  ci-lint         - Run all linters on all packages (validation only, no fixes)"
 	@echo "  ci-lint-hotreload - Run all linters on the root package only (validation only)"
-	@echo "  ci-lint-mypackage - Run all linters on mypackage only (validation only)"
+	@echo "  ci-lint-demopackage - Run all linters on demopackage only (validation only)"
 	@echo "  ci-lint-external - Run all linters on external-package only (validation only)"
 	@echo "  ci-lint-ruff    - Run ruff linter only (all packages, validation only)"
 	@echo "  ci-lint-pyright - Run pyright type checker only (all packages)"
 	@echo "  ci-lint-rust    - Run Rust linters in check-only mode on src directory"
 	@echo " "
 	@echo "  test-hotreload  - Run tests for the hotreload package"
-	@echo "  build-develop   - Build development version in mypackage directory"
+	@echo "  build-develop   - Build development version in demopackage directory"

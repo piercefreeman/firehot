@@ -6,6 +6,8 @@ from time import sleep
 from unittest.mock import patch
 
 import pytest
+from _pytest.capture import CaptureFixture
+from _pytest.logging import LogCaptureFixture
 
 from firehot.embedded.parent_entrypoint import (
     MultiplexedStream,
@@ -15,7 +17,7 @@ from firehot.embedded.parent_entrypoint import (
 )
 
 
-def test_print_redirection(capfd):
+def test_print_redirection(capfd: CaptureFixture[str]) -> None:
     """
     Test that print() output is redirected and prefixed with [PID:<pid>:stdout].
     """
@@ -31,7 +33,7 @@ def test_print_redirection(capfd):
     assert ":stdout]" in captured.out
 
 
-def test_stderr_redirection(capfd):
+def test_stderr_redirection(capfd: CaptureFixture[str]) -> None:
     """
     Test that writing directly to sys.stderr is redirected and annotated with the correct prefix.
     """
@@ -46,7 +48,7 @@ def test_stderr_redirection(capfd):
     assert ":stderr]" in captured.err
 
 
-def test_logging_redirection(capfd):
+def test_logging_redirection(capfd: CaptureFixture[str]) -> None:
     """
     Test that logging output is captured and prefixed as expected.
     Note: Logging output is normally sent to stderr.
@@ -118,7 +120,7 @@ def test_multiline_print_prefix(capfd):
         assert content.strip() == expected
 
 
-def test_thread_safety_check(caplog):
+def test_thread_safety_check(caplog: LogCaptureFixture) -> None:
     """
     Test that check_thread_safety correctly identifies and logs information about multiple threads.
     We create a background thread that sleeps, then verify the warning messages contain the
@@ -186,7 +188,13 @@ def test_thread_safety_check(caplog):
         ("nonexistent_module", {"total": 1, "python": 1}, {"total": 1, "python": 1}, True),
     ],
 )
-def test_import_tracking(caplog, module_name, pre_counts, post_counts, should_raise):
+def test_import_tracking(
+    caplog: LogCaptureFixture,
+    module_name: str,
+    pre_counts: dict[str, int],
+    post_counts: dict[str, int],
+    should_raise: bool,
+) -> None:
     """
     Test the import tracking functionality with different scenarios.
 
@@ -234,7 +242,7 @@ def test_import_tracking(caplog, module_name, pre_counts, post_counts, should_ra
             assert len(caplog.records) == 0
 
 
-def test_execute_dynamic_imports(caplog):
+def test_execute_dynamic_imports(caplog: LogCaptureFixture) -> None:
     """
     Test the execute_dynamic_imports function with various inputs.
     """

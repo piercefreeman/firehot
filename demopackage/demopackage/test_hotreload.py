@@ -8,7 +8,7 @@ This shows how to:
 3. Use multiple concurrent import runners
 
 Run this with:
-    python mypackage/test_hotreload.py
+    python demopackage/test_hotreload.py
 """
 
 import time
@@ -20,7 +20,7 @@ from firehot import isolate_imports
 def global_fn(msg: str, count: int) -> str:
     """
     A simple function that will be executed in the forked process.
-    
+
     :param msg: A message to print
     :param count: Number of times to print the message
 
@@ -30,7 +30,7 @@ def global_fn(msg: str, count: int) -> str:
     # The heavy dependencies should have already been imported by the firehot environment
     from os import getpid, getppid
 
-    from mypackage.app import run_everything
+    from demopackage.app import run_everything
 
     run_everything()
 
@@ -47,7 +47,7 @@ def main():
 
     start = time.time()
     print(f"{runner_name}: This should be the main time expenditure...")
-    with isolate_imports("mypackage") as runner:
+    with isolate_imports("demopackage") as runner:
         print(
             f"{runner_name}: Imports have been loaded in an isolated process in {time.time() - start}s"
         )

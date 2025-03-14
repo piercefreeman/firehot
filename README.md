@@ -79,13 +79,13 @@ When code changes are made in your project, we will:
 
 ## Local Experiments
 
-To test how firehot works with a real project, we bundle a `mypackage` and `external-package` library in this repo.
+To test how firehot works with a real project, we bundle a `demopackage` and `external-package` library in this repo.
 
 ```bash
 # To do a regular, fast development build
-(make build-develop && cd mypackage && uv run test-hotreload)
+(make build-develop && cd demopackage && uv run test-hotreload)
 # To pass the args we use in a release
-(make build-develop MATURIN_ARGS="--release --strip" && cd mypackage && uv run test-hotreload)
+(make build-develop MATURIN_ARGS="--release --strip" && cd demopackage && uv run test-hotreload)
 ```
 
 ## Unit tests
