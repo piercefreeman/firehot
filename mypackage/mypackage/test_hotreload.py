@@ -20,13 +20,12 @@ from firehot import isolate_imports
 def global_fn(msg: str, count: int) -> str:
     """
     A simple function that will be executed in the forked process.
+    
+    :param msg: A message to print
+    :param count: Number of times to print the message
 
-    Args:
-        msg: A message to print
-        count: Number of times to print the message
+    :return: A completion message
 
-    Returns:
-        str: A completion message
     """
     # The heavy dependencies should have already been imported by the firehot environment
     from os import getpid, getppid

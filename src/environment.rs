@@ -602,18 +602,16 @@ pickled_str = "{}"
 /// The Python process prints "IMPORTS_LOADED" to stdout once all imports are complete.
 /// After that, it will listen for commands on stdin, which can include fork requests and code to execute.
 fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
-    // Create import code for Python to execute
-    let mut import_lines = String::new();
-    for module in modules {
-        import_lines.push_str(&format!("__import__('{}')\n", module));
-    }
+    // Convert modules to a JSON list of module names
+    let import_json = serde_json::to_string(&Vec::from_iter(modules.iter().cloned()))
+        .map_err(|e| anyhow!("Failed to serialize module names: {}", e))?;
 
-    debug!("Module import injection code: {}", import_lines);
+    debug!("Module import JSON: {}", import_json);
 
     // Spawn Python process with all modules pre-imported
     let child = Command::new("python")
         .args(["-c", PYTHON_LOADER_SCRIPT])
-        .arg(import_lines)
+        .arg(import_json)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

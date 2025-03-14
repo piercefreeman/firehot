@@ -394,9 +394,66 @@ def check_thread_safety() -> None:
         )
 
 
-#
-# Main Logic
-#
+def track_and_execute_import(module_name: str, firehot_logger: logging.Logger) -> None:
+    """
+    Execute a single import and track any thread count changes.
+
+    :param module_name: The name of the module to import
+    :param firehot_logger: Logger instance to use for warnings
+
+    :raises Exception: If the import fails
+
+    """
+    # Get thread count before import
+    pre_import_thread_count = get_total_thread_count()
+    pre_import_python_threads = threading.active_count()
+
+    # Execute the import
+    __import__(module_name)
+
+    # Get thread count after import
+    post_import_thread_count = get_total_thread_count()
+    post_import_python_threads = threading.active_count()
+
+    # If thread count changed, log the details
+    if post_import_thread_count > pre_import_thread_count:
+        firehot_logger.warning(
+            f"Import of {module_name!r} introduced {post_import_thread_count - pre_import_thread_count} new thread(s):\n"
+            f"  - Total threads: {pre_import_thread_count} -> {post_import_thread_count}\n"
+            f"  - Python threads: {pre_import_python_threads} -> {post_import_python_threads}\n"
+            f"  - C/native threads: {pre_import_thread_count - pre_import_python_threads} -> {post_import_thread_count - post_import_python_threads}"
+        )
+
+
+def execute_dynamic_imports(dynamic_imports: str, firehot_logger: logging.Logger) -> None:
+    """
+    Parse and execute a list of dynamic imports, tracking thread creation for each import.
+
+    :param dynamic_imports: JSON string containing a list of module names to import
+    :param firehot_logger: Logger instance to use for warnings
+
+    :raises ImportError: If imports cannot be parsed or executed
+
+    """
+    if not dynamic_imports:
+        return
+
+    # Parse the JSON list of module names
+    try:
+        module_list = json_loads(dynamic_imports)
+        if not isinstance(module_list, list):
+            raise ValueError("Expected a JSON list of module names")
+    except (JSONDecodeError, ValueError) as e:
+        write_message(ImportError(error=str(e), traceback=format_exc()))
+        sys.exit(1)
+
+    # Track thread counts for each import
+    for module_name in module_list:
+        try:
+            track_and_execute_import(module_name, firehot_logger)
+        except Exception as e:
+            write_message(ImportError(error=str(e), traceback=format_exc()))
+            sys.exit(1)
 
 
 def main():
@@ -405,8 +462,7 @@ def main():
 
     # Execute the dynamic imports
     try:
-        if dynamic_imports:
-            exec(dynamic_imports)
+        execute_dynamic_imports(dynamic_imports, firehot_logger)
     except Exception as e:
         write_message(ImportError(error=str(e), traceback=format_exc()))
         sys.exit(1)
