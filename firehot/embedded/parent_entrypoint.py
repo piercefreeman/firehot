@@ -418,7 +418,7 @@ def track_and_execute_import(module_name: str, firehot_logger: logging.Logger) -
     # If thread count changed, log the details
     if post_import_thread_count > pre_import_thread_count:
         firehot_logger.warning(
-            f"Import of {module_name!r} introduced {post_import_thread_count - pre_import_thread_count} new thread(s):\n"
+            f"Import of {module_name!r} introduced {post_import_thread_count - pre_import_thread_count} new threads:\n"
             f"  - Total threads: {pre_import_thread_count} -> {post_import_thread_count}\n"
             f"  - Python threads: {pre_import_python_threads} -> {post_import_python_threads}\n"
             f"  - C/native threads: {pre_import_thread_count - pre_import_python_threads} -> {post_import_thread_count - post_import_python_threads}"
