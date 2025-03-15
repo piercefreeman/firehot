@@ -44,11 +44,13 @@ pub struct ProjectAstManager {
     package_name: String,
     /// The root path of the project
     project_path: String,
+    /// Set of modules to ignore when determining third-party imports
+    ignored_modules: HashSet<String>,
 }
 
 impl ProjectAstManager {
     /// Create a new ProjectAstManager for the given project path
-    pub fn new(project_name: &str, project_path: &str) -> Self {
+    pub fn new(project_name: &str, project_path: &str, ignored_modules: Option<HashSet<String>>) -> Self {
         debug!(
             "Creating new ProjectAstManager for {} at {}",
             project_name, project_path
@@ -58,6 +60,7 @@ impl ProjectAstManager {
             file_imports: HashMap::new(),
             package_name: project_name.to_string(),
             project_path: project_path.to_string(),
+            ignored_modules: ignored_modules.unwrap_or_default(),
         }
     }
 
@@ -226,6 +229,11 @@ impl ProjectAstManager {
         trace!("Checking if import is third party: {:?}", imp);
         trace!("Package name: {}", self.package_name);
 
+        // If the module is in the ignored list, it's not considered third-party
+        if self.ignored_modules.contains(&imp.module) {
+            return false;
+        }
+
         let is_third_party = !imp.is_relative && !imp.module.starts_with(&self.package_name);
 
         trace!("Is third party: {}", is_third_party);
@@ -350,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_project_ast_manager_initialization() {
-        let manager = ProjectAstManager::new("test_package", "/test/path");
+        let manager = ProjectAstManager::new("test_package", "/test/path", None);
         assert_eq!(manager.get_project_path(), "/test/path");
         assert_eq!(manager.get_package_name(), "test_package");
     }
@@ -360,7 +368,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = create_temp_py_file(&temp_dir, "test.py", "print('hello')");
 
-        let manager = ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap());
+        let manager = ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap(), None);
         let hash_result = manager.calculate_file_hash(file_path.to_str().unwrap());
 
         assert!(hash_result.is_ok());
@@ -573,7 +581,7 @@ def function():
 
     #[test]
     fn test_is_third_party_import() {
-        let manager = ProjectAstManager::new("my_package", "/test/path");
+        let manager = ProjectAstManager::new("my_package", "/test/path", None);
 
         // First-party absolute import (starts with package name)
         let first_party = ImportInfo {
@@ -612,7 +620,7 @@ def function():
         let python_code = "import os\nimport sys";
         let file_path = create_temp_py_file(&temp_dir, "test_file.py", python_code);
 
-        let mut manager = ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap());
+        let mut manager = ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap(), None);
         let imports_result = manager.process_py_file(file_path.to_str().unwrap());
 
         assert!(imports_result.is_ok());
@@ -630,7 +638,7 @@ def function():
         let file_path = create_temp_py_file(&temp_dir, "test_cache.py", python_code);
         let path_str = file_path.to_str().unwrap();
 
-        let mut manager = ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap());
+        let mut manager = ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap(), None);
 
         // First call should parse the file
         let _ = manager.process_py_file(path_str).unwrap();
@@ -669,7 +677,7 @@ def function():
         let file1_path = create_temp_py_file(&temp_dir, "file1.py", "import os\nimport requests");
         let _file2_path = create_temp_py_file(&temp_dir, "file2.py", "import sys\nimport flask");
 
-        let mut manager = ProjectAstManager::new("testpkg", temp_dir.path().to_str().unwrap());
+        let mut manager = ProjectAstManager::new("testpkg", temp_dir.path().to_str().unwrap(), None);
 
         // Initial processing
         let initial_imports = manager.process_all_py_files().unwrap();
