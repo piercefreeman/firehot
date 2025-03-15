@@ -708,4 +708,65 @@ def function():
         assert!(!removed.is_empty());
         assert!(removed.contains("requests"));
     }
+
+    #[test]
+    fn test_ignored_modules() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a Python file with various imports
+        let python_code = r#"
+import os
+import sys
+import requests
+from pandas import DataFrame
+from my_package.utils import helper
+from . import local_module
+        "#;
+        create_temp_py_file(&temp_dir, "test_imports.py", python_code);
+
+        // Create a manager with ignored modules
+        let mut ignored_modules = HashSet::new();
+        ignored_modules.insert("pandas".to_string());
+        ignored_modules.insert("requests".to_string());
+        
+        let mut manager = ProjectAstManager::new(
+            "my_package",
+            temp_dir.path().to_str().unwrap(),
+            Some(ignored_modules),
+        );
+
+        // Process all files and get third-party imports
+        let third_party_imports = manager.process_all_py_files().unwrap();
+
+        // Verify that ignored modules are not included in third-party imports
+        assert!(!third_party_imports.contains("pandas"), "pandas should be ignored");
+        assert!(!third_party_imports.contains("requests"), "requests should be ignored");
+
+        // But other third-party modules should be included
+        assert!(third_party_imports.contains("os"), "os should be included");
+        assert!(third_party_imports.contains("sys"), "sys should be included");
+
+        // First-party imports should still be excluded
+        assert!(!third_party_imports.contains("my_package.utils"), "my_package.utils should not be included");
+        assert!(!third_party_imports.contains("local_module"), "local_module should not be included");
+
+        // Now test with no ignored modules
+        let mut manager_no_ignore = ProjectAstManager::new(
+            "my_package",
+            temp_dir.path().to_str().unwrap(),
+            None,
+        );
+
+        let all_third_party_imports = manager_no_ignore.process_all_py_files().unwrap();
+
+        // Without ignore list, all third-party modules should be included
+        assert!(all_third_party_imports.contains("pandas"), "pandas should be included when not ignored");
+        assert!(all_third_party_imports.contains("requests"), "requests should be included when not ignored");
+        assert!(all_third_party_imports.contains("os"), "os should be included");
+        assert!(all_third_party_imports.contains("sys"), "sys should be included");
+
+        // First-party imports should still be excluded
+        assert!(!all_third_party_imports.contains("my_package.utils"), "my_package.utils should not be included");
+        assert!(!all_third_party_imports.contains("local_module"), "local_module should not be included");
+    }
 }
