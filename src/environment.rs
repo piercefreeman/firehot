@@ -30,9 +30,13 @@ pub struct Environment {
 }
 
 impl Environment {
-    pub fn new(project_name: &str, project_path: &str) -> Self {
+    pub fn new(
+        project_name: &str,
+        project_path: &str,
+        ignored_modules: Option<HashSet<String>>,
+    ) -> Self {
         // Create a new AST manager for this project
-        let ast_manager = ProjectAstManager::new(project_name, project_path);
+        let ast_manager = ProjectAstManager::new(project_name, project_path, ignored_modules);
         info!("Created AST manager for project: {}", project_name);
 
         Self {
@@ -45,9 +49,13 @@ impl Environment {
     }
 
     /// Create a new Environment in test mode (buffers output instead of printing)
-    pub fn new_for_test(project_name: &str, project_path: &str) -> Self {
+    pub fn new_for_test(
+        project_name: &str,
+        project_path: &str,
+        ignored_modules: Option<HashSet<String>>,
+    ) -> Self {
         // Create a new AST manager for this project
-        let ast_manager = ProjectAstManager::new(project_name, project_path);
+        let ast_manager = ProjectAstManager::new(project_name, project_path, ignored_modules);
         info!("Created AST manager for project: {}", project_name);
 
         Self {
@@ -647,7 +655,7 @@ mod tests {
         // Create a simple Python project
         create_temp_py_file(&temp_dir, "main.py", "print('Hello, world!')");
 
-        let mut runner = Environment::new("test_package", dir_path);
+        let mut runner = Environment::new("test_package", dir_path, None);
         assert_eq!(runner.ast_manager.get_project_path(), dir_path);
 
         // Boot the environment before checking it
@@ -668,7 +676,7 @@ mod tests {
         // Create a simple Python project with initial imports
         create_temp_py_file(&temp_dir, "main.py", "import os\nimport sys");
 
-        let mut runner = Environment::new("test_package", dir_path);
+        let mut runner = Environment::new("test_package", dir_path, None);
 
         // Boot the environment before accessing it
         runner.boot_main().expect("Failed to boot main environment");
@@ -750,7 +758,7 @@ def main():
             crate::test_utils::harness::prepare_script_for_isolation(python_script, "main")
                 .expect("Failed to prepare script for isolation");
 
-        let mut runner = Environment::new("test_package", &python_env.container_path);
+        let mut runner = Environment::new("test_package", &python_env.container_path, None);
 
         // Boot the environment before accessing it
         runner.boot_main().expect("Failed to boot main environment");
@@ -800,7 +808,7 @@ def main():
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
-        let mut runner = Environment::new("test_package", dir_path);
+        let mut runner = Environment::new("test_package", dir_path, None);
 
         // Boot the environment before accessing it
         runner.boot_main().expect("Failed to boot main environment");
@@ -885,7 +893,7 @@ def main():
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().to_str().unwrap();
 
-        let mut runner = Environment::new("test_package", dir_path);
+        let mut runner = Environment::new("test_package", dir_path, None);
 
         // Boot the environment before stopping it
         runner.boot_main().expect("Failed to boot main environment");
@@ -921,7 +929,7 @@ def main():
             crate::test_utils::harness::prepare_script_for_isolation(python_script, "main")?;
 
         // Create and boot the Environment
-        let mut runner = Environment::new("test_package", dir_path);
+        let mut runner = Environment::new("test_package", dir_path, None);
         runner.boot_main()?;
 
         // Execute the script in isolation - this should not fail at this point
@@ -980,7 +988,7 @@ def main():
                 .expect("Failed to prepare long-running script for isolation");
 
         // Create and boot environment
-        let mut runner = Environment::new("test_package", &python_env.container_path);
+        let mut runner = Environment::new("test_package", &python_env.container_path, None);
         runner.boot_main().expect("Failed to boot main environment");
 
         // Execute the long-running function

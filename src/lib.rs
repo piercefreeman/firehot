@@ -7,6 +7,7 @@ use std::{collections::HashMap, time::Instant};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::collections::HashSet;
 use std::sync::Mutex;
 use uuid::Uuid;
 
@@ -86,7 +87,12 @@ fn firehot(_py: Python, m: &PyModule) -> PyResult<()> {
 
 /// Initialize and start the import runner, returning a unique identifier
 #[pyfunction]
-fn start_import_runner(_py: Python, project_name: &str, package_path: &str) -> PyResult<String> {
+fn start_import_runner(
+    _py: Python,
+    project_name: &str,
+    package_path: &str,
+    ignored_modules: Option<Vec<String>>,
+) -> PyResult<String> {
     // Generate a unique ID for this runner
     let env_id = Uuid::new_v4().to_string();
 
@@ -98,9 +104,13 @@ fn start_import_runner(_py: Python, project_name: &str, package_path: &str) -> P
         project_name.cyan().bold()
     );
 
+    // Convert ignored_modules from Vec to HashSet if provided
+    let ignored_modules_set =
+        ignored_modules.map(|modules| modules.into_iter().collect::<HashSet<String>>());
+
     // Create the runner object
     info!("Creating environment with ID: {}", env_id);
-    let mut runner = environment::Environment::new(project_name, package_path);
+    let mut runner = environment::Environment::new(project_name, package_path, ignored_modules_set);
 
     runner.boot_main().map_err(|e| {
         error!("Failed to boot main: {}", e);

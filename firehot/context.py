@@ -42,18 +42,21 @@ def resolve_package_metadata(package: str) -> tuple[str, str]:
 
 
 @contextmanager
-def isolate_imports(package: str):
+def isolate_imports(package: str, *, ignored_modules: list[str] | None = None):
     """
     Context manager that isolates imports for the given package path.
 
     :param package: Package to isolate imports. This must be importable from the current
                     virtual environment
+    :param ignored_modules: Optional list of module names to ignore during hot reloading.
+                          Changes to these modules will not trigger reloads.
     :yields: An Environment object that can be used to execute code in the isolated environment
+
     """
     package_path, package_name = resolve_package_metadata(package)
     runner_id: str | None = None
     try:
-        runner_id = start_import_runner_rs(package_name, package_path)
+        runner_id = start_import_runner_rs(package_name, package_path, ignored_modules)
         yield Environment(runner_id)
     finally:
         if runner_id:
