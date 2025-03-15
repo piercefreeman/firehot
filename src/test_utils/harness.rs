@@ -253,7 +253,7 @@ def main():
         let (pickled_data, python_env) = prepare_script_for_isolation(python_script, "main")?;
 
         // Create a mock Environment
-        let mut runner = Environment::new("test_package", &python_env.container_path);
+        let mut runner = Environment::new("test_package", &python_env.container_path, None);
 
         // Boot the environment
         runner.boot_main()?;

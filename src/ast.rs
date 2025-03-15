@@ -50,7 +50,11 @@ pub struct ProjectAstManager {
 
 impl ProjectAstManager {
     /// Create a new ProjectAstManager for the given project path
-    pub fn new(project_name: &str, project_path: &str, ignored_modules: Option<HashSet<String>>) -> Self {
+    pub fn new(
+        project_name: &str,
+        project_path: &str,
+        ignored_modules: Option<HashSet<String>>,
+    ) -> Self {
         debug!(
             "Creating new ProjectAstManager for {} at {}",
             project_name, project_path
@@ -368,7 +372,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = create_temp_py_file(&temp_dir, "test.py", "print('hello')");
 
-        let manager = ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap(), None);
+        let manager =
+            ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap(), None);
         let hash_result = manager.calculate_file_hash(file_path.to_str().unwrap());
 
         assert!(hash_result.is_ok());
@@ -620,7 +625,8 @@ def function():
         let python_code = "import os\nimport sys";
         let file_path = create_temp_py_file(&temp_dir, "test_file.py", python_code);
 
-        let mut manager = ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap(), None);
+        let mut manager =
+            ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap(), None);
         let imports_result = manager.process_py_file(file_path.to_str().unwrap());
 
         assert!(imports_result.is_ok());
@@ -638,7 +644,8 @@ def function():
         let file_path = create_temp_py_file(&temp_dir, "test_cache.py", python_code);
         let path_str = file_path.to_str().unwrap();
 
-        let mut manager = ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap(), None);
+        let mut manager =
+            ProjectAstManager::new("test_package", temp_dir.path().to_str().unwrap(), None);
 
         // First call should parse the file
         let _ = manager.process_py_file(path_str).unwrap();
@@ -677,7 +684,8 @@ def function():
         let file1_path = create_temp_py_file(&temp_dir, "file1.py", "import os\nimport requests");
         let _file2_path = create_temp_py_file(&temp_dir, "file2.py", "import sys\nimport flask");
 
-        let mut manager = ProjectAstManager::new("testpkg", temp_dir.path().to_str().unwrap(), None);
+        let mut manager =
+            ProjectAstManager::new("testpkg", temp_dir.path().to_str().unwrap(), None);
 
         // Initial processing
         let initial_imports = manager.process_all_py_files().unwrap();
@@ -728,7 +736,7 @@ from . import local_module
         let mut ignored_modules = HashSet::new();
         ignored_modules.insert("pandas".to_string());
         ignored_modules.insert("requests".to_string());
-        
+
         let mut manager = ProjectAstManager::new(
             "my_package",
             temp_dir.path().to_str().unwrap(),
@@ -739,34 +747,64 @@ from . import local_module
         let third_party_imports = manager.process_all_py_files().unwrap();
 
         // Verify that ignored modules are not included in third-party imports
-        assert!(!third_party_imports.contains("pandas"), "pandas should be ignored");
-        assert!(!third_party_imports.contains("requests"), "requests should be ignored");
+        assert!(
+            !third_party_imports.contains("pandas"),
+            "pandas should be ignored"
+        );
+        assert!(
+            !third_party_imports.contains("requests"),
+            "requests should be ignored"
+        );
 
         // But other third-party modules should be included
         assert!(third_party_imports.contains("os"), "os should be included");
-        assert!(third_party_imports.contains("sys"), "sys should be included");
+        assert!(
+            third_party_imports.contains("sys"),
+            "sys should be included"
+        );
 
         // First-party imports should still be excluded
-        assert!(!third_party_imports.contains("my_package.utils"), "my_package.utils should not be included");
-        assert!(!third_party_imports.contains("local_module"), "local_module should not be included");
+        assert!(
+            !third_party_imports.contains("my_package.utils"),
+            "my_package.utils should not be included"
+        );
+        assert!(
+            !third_party_imports.contains("local_module"),
+            "local_module should not be included"
+        );
 
         // Now test with no ignored modules
-        let mut manager_no_ignore = ProjectAstManager::new(
-            "my_package",
-            temp_dir.path().to_str().unwrap(),
-            None,
-        );
+        let mut manager_no_ignore =
+            ProjectAstManager::new("my_package", temp_dir.path().to_str().unwrap(), None);
 
         let all_third_party_imports = manager_no_ignore.process_all_py_files().unwrap();
 
         // Without ignore list, all third-party modules should be included
-        assert!(all_third_party_imports.contains("pandas"), "pandas should be included when not ignored");
-        assert!(all_third_party_imports.contains("requests"), "requests should be included when not ignored");
-        assert!(all_third_party_imports.contains("os"), "os should be included");
-        assert!(all_third_party_imports.contains("sys"), "sys should be included");
+        assert!(
+            all_third_party_imports.contains("pandas"),
+            "pandas should be included when not ignored"
+        );
+        assert!(
+            all_third_party_imports.contains("requests"),
+            "requests should be included when not ignored"
+        );
+        assert!(
+            all_third_party_imports.contains("os"),
+            "os should be included"
+        );
+        assert!(
+            all_third_party_imports.contains("sys"),
+            "sys should be included"
+        );
 
         // First-party imports should still be excluded
-        assert!(!all_third_party_imports.contains("my_package.utils"), "my_package.utils should not be included");
-        assert!(!all_third_party_imports.contains("local_module"), "local_module should not be included");
+        assert!(
+            !all_third_party_imports.contains("my_package.utils"),
+            "my_package.utils should not be included"
+        );
+        assert!(
+            !all_third_party_imports.contains("local_module"),
+            "local_module should not be included"
+        );
     }
 }

@@ -648,7 +648,7 @@ def main():
             crate::test_utils::harness::prepare_script_for_isolation(python_script, "main")?;
 
         // Create and boot the Environment
-        let mut runner = Environment::new_for_test("test_package", dir_path);
+        let mut runner = Environment::new_for_test("test_package", dir_path, None);
         runner.boot_main()?;
 
         // Execute the script in isolation
@@ -725,7 +725,7 @@ def main():
             crate::test_utils::harness::prepare_script_for_isolation(python_script, "main")?;
 
         // Create and boot the Environment
-        let mut runner = Environment::new_for_test("test_package", dir_path);
+        let mut runner = Environment::new_for_test("test_package", dir_path, None);
         runner.boot_main()?;
 
         // Execute the script in isolation

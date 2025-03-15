@@ -30,7 +30,11 @@ pub struct Environment {
 }
 
 impl Environment {
-    pub fn new(project_name: &str, project_path: &str, ignored_modules: Option<HashSet<String>>) -> Self {
+    pub fn new(
+        project_name: &str,
+        project_path: &str,
+        ignored_modules: Option<HashSet<String>>,
+    ) -> Self {
         // Create a new AST manager for this project
         let ast_manager = ProjectAstManager::new(project_name, project_path, ignored_modules);
         info!("Created AST manager for project: {}", project_name);
@@ -45,7 +49,11 @@ impl Environment {
     }
 
     /// Create a new Environment in test mode (buffers output instead of printing)
-    pub fn new_for_test(project_name: &str, project_path: &str, ignored_modules: Option<HashSet<String>>) -> Self {
+    pub fn new_for_test(
+        project_name: &str,
+        project_path: &str,
+        ignored_modules: Option<HashSet<String>>,
+    ) -> Self {
         // Create a new AST manager for this project
         let ast_manager = ProjectAstManager::new(project_name, project_path, ignored_modules);
         info!("Created AST manager for project: {}", project_name);
