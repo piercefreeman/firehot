@@ -116,7 +116,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: auto
-          args: -vv --release --out dist
+          args: -vv --release --out dist --interpreter ${{ matrix.python-version }}
           rust-toolchain: stable
           docker-options: -e CI -e CI_TARGET=${{ matrix.target }}
           # Already defaults to build, but we make explicit here. Any arguments should
