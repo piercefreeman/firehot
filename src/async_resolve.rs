@@ -76,7 +76,7 @@ impl<T: Clone> AsyncResolve<T> {
             let value_lock_result = self.value.lock();
 
             if let Err(e) = &value_lock_result {
-                let err_msg = format!("Failed to lock value mutex: {:?}", e);
+                let err_msg = format!("Failed to lock value mutex: {e:?}");
                 warn!("{}", err_msg);
                 return Err(err_msg);
             }
@@ -98,7 +98,7 @@ impl<T: Clone> AsyncResolve<T> {
         let completion_lock_result = mutex.lock();
 
         if let Err(e) = &completion_lock_result {
-            let err_msg = format!("Failed to lock completion mutex: {:?}", e);
+            let err_msg = format!("Failed to lock completion mutex: {e:?}");
             warn!("{}", err_msg);
             return Err(err_msg);
         }
@@ -112,7 +112,7 @@ impl<T: Clone> AsyncResolve<T> {
             let wait_result = condvar.wait(completed);
 
             if let Err(e) = &wait_result {
-                let err_msg = format!("Failed to wait on condvar: {:?}", e);
+                let err_msg = format!("Failed to wait on condvar: {e:?}");
                 warn!("{}", err_msg);
                 return Err(err_msg);
             }
@@ -133,7 +133,7 @@ impl<T: Clone> AsyncResolve<T> {
         let value_lock_result = self.value.lock();
 
         if let Err(e) = &value_lock_result {
-            let err_msg = format!("Failed to lock value mutex after wait: {:?}", e);
+            let err_msg = format!("Failed to lock value mutex after wait: {e:?}");
             warn!("{}", err_msg);
             return Err(err_msg);
         }

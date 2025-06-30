@@ -131,14 +131,14 @@ fn update_environment(_py: Python, env_id: &str) -> PyResult<bool> {
     info!("Updating environment for runner: {}", env_id);
     let mut environments = ENVIRONMENTS.lock().unwrap();
     let environment = environments.get_mut(env_id).ok_or_else(|| {
-        let err_msg = format!("No import runner found with ID: {}", env_id);
+        let err_msg = format!("No import runner found with ID: {env_id}");
         error!("{}", err_msg);
         PyRuntimeError::new_err(err_msg)
     })?;
 
     // Update the environment using the runner's method
     let updated = environment.update_environment().map_err(|e| {
-        let err_msg = format!("Failed to update environment: {}", e);
+        let err_msg = format!("Failed to update environment: {e}");
         error!("{}", err_msg);
         PyRuntimeError::new_err(err_msg)
     })?;
@@ -162,7 +162,7 @@ fn stop_import_runner(_py: Python, env_id: &str) -> PyResult<()> {
     eprintln!(
         "\n{} {}\n",
         "⏹".yellow().bold(),
-        format!("Stopping environment {}", env_id).white().bold()
+        format!("Stopping environment {env_id}").white().bold()
     );
 
     let start_time = Instant::now();
@@ -171,7 +171,7 @@ fn stop_import_runner(_py: Python, env_id: &str) -> PyResult<()> {
     if let Some(environment) = environments.remove(env_id) {
         // Clean up resources
         environment.stop_main().map_err(|e| {
-            let err_msg = format!("Failed to stop environment: {}", e);
+            let err_msg = format!("Failed to stop environment: {e}");
             error!("{}", err_msg);
             PyRuntimeError::new_err(err_msg)
         })?;
@@ -188,7 +188,7 @@ fn stop_import_runner(_py: Python, env_id: &str) -> PyResult<()> {
 
         Ok(())
     } else {
-        let err_msg = format!("No environment found with ID: {}", env_id);
+        let err_msg = format!("No environment found with ID: {env_id}");
         error!("{}", err_msg);
 
         // Log the error with owo_colors
@@ -235,7 +235,7 @@ fn exec_isolated<'py>(
         match environment.exec_isolated(&pickled_data, name) {
             Ok(result) => {
                 debug!("Function executed successfully in isolated process");
-                Ok(py.eval(&format!("'{}'", result), None, None)?)
+                Ok(py.eval(&format!("'{result}'"), None, None)?)
             }
             Err(err) => {
                 error!("Error executing function in isolated process: {}", err);
@@ -243,7 +243,7 @@ fn exec_isolated<'py>(
             }
         }
     } else {
-        let err_msg = format!("No import runner found with ID: {}", env_id);
+        let err_msg = format!("No import runner found with ID: {env_id}");
         error!("{}", err_msg);
         Err(PyRuntimeError::new_err(err_msg))
     }
@@ -259,12 +259,12 @@ fn stop_isolated(_py: Python, env_id: &str, process_uuid: &str) -> PyResult<bool
     let environments = ENVIRONMENTS.lock().unwrap();
     if let Some(environment) = environments.get(env_id) {
         environment.stop_isolated(process_uuid).map_err(|e| {
-            let err_msg = format!("Failed to stop isolated process: {}", e);
+            let err_msg = format!("Failed to stop isolated process: {e}");
             error!("{}", err_msg);
             PyRuntimeError::new_err(err_msg)
         })
     } else {
-        let err_msg = format!("No import environment found with ID: {}", env_id);
+        let err_msg = format!("No import environment found with ID: {env_id}");
         error!("{}", err_msg);
         Err(PyRuntimeError::new_err(err_msg))
     }
@@ -280,13 +280,13 @@ fn communicate_isolated(_py: Python, env_id: &str, process_uuid: &str) -> PyResu
     let environments = ENVIRONMENTS.lock().unwrap();
     if let Some(environment) = environments.get(env_id) {
         environment.communicate_isolated(process_uuid).map_err(|e| {
-            let err_msg = format!("Child process error: {}", e);
+            let err_msg = format!("Child process error: {e}");
             error!("{}", err_msg);
             // Use the standard PyRuntimeError instead of custom exception
             PyRuntimeError::new_err(err_msg)
         })
     } else {
-        let err_msg = format!("No import environment found with ID: {}", env_id);
+        let err_msg = format!("No import environment found with ID: {env_id}");
         error!("{}", err_msg);
         Err(PyRuntimeError::new_err(err_msg))
     }

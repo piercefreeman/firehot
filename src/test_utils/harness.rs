@@ -101,25 +101,25 @@ pub fn prepare_script_for_isolation(
 ) -> Result<(String, PythonPathGuard), String> {
     // Create a temporary directory for the script
     let temp_dir =
-        TempDir::new().map_err(|e| format!("Failed to create temporary directory: {}", e))?;
+        TempDir::new().map_err(|e| format!("Failed to create temporary directory: {e}"))?;
 
     // Create a valid Python module name (no dashes, start with letter)
     let module_name = format!("pymodule{}", Uuid::new_v4().to_string().replace("-", ""));
 
     // Create the module directory inside the temp directory
     let module_dir = temp_dir.path().join(&module_name);
-    fs::create_dir(&module_dir).map_err(|e| format!("Failed to create module directory: {}", e))?;
+    fs::create_dir(&module_dir).map_err(|e| format!("Failed to create module directory: {e}"))?;
 
     // Create __init__.py inside the module directory to make it a proper package
     let init_path = module_dir.join("__init__.py");
     fs::write(&init_path, "# Package initialization")
-        .map_err(|e| format!("Failed to write __init__.py file: {}", e))?;
+        .map_err(|e| format!("Failed to write __init__.py file: {e}"))?;
 
     // Create the script file inside the module directory (using a standard name)
     let script_file_name = "script.py";
     let script_path = module_dir.join(script_file_name);
     fs::write(&script_path, python_script)
-        .map_err(|e| format!("Failed to write script to file: {}", e))?;
+        .map_err(|e| format!("Failed to write script to file: {e}"))?;
 
     // At this point our directory looks like:
     // pymodule
@@ -156,7 +156,7 @@ print(pickled_data)
     // Write the pickle script directly to the temp directory (not in the module)
     let pickle_script_path = temp_dir.path().join("pickle_helper.py");
     fs::write(&pickle_script_path, pickle_script)
-        .map_err(|e| format!("Failed to write pickle script to temporary file: {}", e))?;
+        .map_err(|e| format!("Failed to write pickle script to temporary file: {e}"))?;
 
     // Serialize the payload to a JSON string
     let json_payload = isolation_payload.to_string();
@@ -175,12 +175,12 @@ print(pickled_data)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to spawn Python process: {}", e))?;
+        .map_err(|e| format!("Failed to spawn Python process: {e}"))?;
 
     // Get the output
     let output = child
         .wait_with_output()
-        .map_err(|e| format!("Failed to get Python process output: {}", e))?;
+        .map_err(|e| format!("Failed to get Python process output: {e}"))?;
 
     // Log stderr for debugging
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -190,7 +190,7 @@ print(pickled_data)
 
     // Check if the process executed successfully
     if !output.status.success() {
-        return Err(format!("Python pickling failed: {}", stderr));
+        return Err(format!("Python pickling failed: {stderr}"));
     }
 
     // Parse the output (base64 encoded pickled data)
@@ -231,7 +231,7 @@ def main():
         // Verify the pickled data is valid base64
         let _decoded = base64::engine::general_purpose::STANDARD
             .decode(pickled_data)
-            .map_err(|e| format!("Invalid base64: {}", e))?;
+            .map_err(|e| format!("Invalid base64: {e}"))?;
 
         Ok(())
     }

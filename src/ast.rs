@@ -223,7 +223,7 @@ impl ProjectAstManager {
         let mut hasher = Sha256::new();
         hasher.update(&content);
         let hash = hasher.finalize();
-        let hash_str = format!("{:x}", hash);
+        let hash_str = format!("{hash:x}");
         trace!("Calculated hash for {}: {}", file_path, hash_str);
         Ok(hash_str)
     }
@@ -404,13 +404,13 @@ mod tests {
         assert_eq!(imports.len(), 2);
         assert_eq!(imports[0].module, "os");
         assert_eq!(imports[0].names, vec!["os"]);
-        assert_eq!(imports[0].is_relative, false);
-        assert_eq!(imports[0].is_from_import, false);
+        assert!(!imports[0].is_relative);
+        assert!(!imports[0].is_from_import);
 
         assert_eq!(imports[1].module, "sys");
         assert_eq!(imports[1].names, vec!["sys"]);
-        assert_eq!(imports[1].is_relative, false);
-        assert_eq!(imports[1].is_from_import, false);
+        assert!(!imports[1].is_relative);
+        assert!(!imports[1].is_from_import);
     }
 
     #[test]
@@ -432,13 +432,13 @@ mod tests {
         assert_eq!(imports.len(), 2);
         assert_eq!(imports[0].module, "os");
         assert_eq!(imports[0].names, vec!["path"]);
-        assert_eq!(imports[0].is_relative, false);
-        assert_eq!(imports[0].is_from_import, true);
+        assert!(!imports[0].is_relative);
+        assert!(imports[0].is_from_import);
 
         assert_eq!(imports[1].module, "sys");
         assert_eq!(imports[1].names, vec!["argv", "version"]);
-        assert_eq!(imports[1].is_relative, false);
-        assert_eq!(imports[1].is_from_import, true);
+        assert!(!imports[1].is_relative);
+        assert!(imports[1].is_from_import);
     }
 
     #[test]
@@ -460,13 +460,13 @@ mod tests {
         assert_eq!(imports.len(), 2);
         assert_eq!(imports[0].module, "os");
         assert_eq!(imports[0].names, vec!["os"]);
-        assert_eq!(imports[0].is_relative, false);
-        assert_eq!(imports[0].is_from_import, false);
+        assert!(!imports[0].is_relative);
+        assert!(!imports[0].is_from_import);
 
         assert_eq!(imports[1].module, "sys");
         assert_eq!(imports[1].names, vec!["argv"]);
-        assert_eq!(imports[1].is_relative, false);
-        assert_eq!(imports[1].is_from_import, true);
+        assert!(!imports[1].is_relative);
+        assert!(imports[1].is_from_import);
     }
 
     #[test]
@@ -486,7 +486,7 @@ mod tests {
         let imports = collect_imports(stmts);
 
         // Debugging to understand the actual structure
-        println!("Relative imports found: {:#?}", imports);
+        println!("Relative imports found: {imports:#?}");
 
         // For now, just check that we find something, we'll refine this test
         // after seeing the actual output structure
@@ -494,8 +494,8 @@ mod tests {
 
         // All these should be relative from imports
         for import in &imports {
-            assert_eq!(import.is_from_import, true);
-            assert_eq!(import.is_relative, true);
+            assert!(import.is_from_import);
+            assert!(import.is_relative);
         }
     }
 
@@ -574,14 +574,14 @@ def function():
         // First import: "import time"
         assert_eq!(imports[0].module, "time");
         assert_eq!(imports[0].names, vec!["time"]);
-        assert_eq!(imports[0].is_relative, false);
-        assert_eq!(imports[0].is_from_import, false); // This is a simple import
+        assert!(!imports[0].is_relative);
+        assert!(!imports[0].is_from_import); // This is a simple import
 
         // Second import: "from time import time as time_func"
         assert_eq!(imports[1].module, "time");
         assert_eq!(imports[1].names, vec!["time"]); // Should contain the original name, not the alias
-        assert_eq!(imports[1].is_relative, false);
-        assert_eq!(imports[1].is_from_import, true); // This is a from import
+        assert!(!imports[1].is_relative);
+        assert!(imports[1].is_from_import); // This is a from import
     }
 
     #[test]
@@ -689,7 +689,7 @@ def function():
 
         // Initial processing
         let initial_imports = manager.process_all_py_files().unwrap();
-        println!("Initial imports found: {:#?}", initial_imports);
+        println!("Initial imports found: {initial_imports:#?}");
 
         // Verify we have the expected number of third-party imports
         // os, requests, sys, flask should all be considered third-party
@@ -707,8 +707,8 @@ def function():
 
         // Compute delta - should detect the changes
         let (added, removed) = manager.compute_import_delta().unwrap();
-        println!("Added imports: {:#?}", added);
-        println!("Removed imports: {:#?}", removed);
+        println!("Added imports: {added:#?}");
+        println!("Removed imports: {removed:#?}");
 
         assert!(!added.is_empty());
         assert!(added.contains("pandas"));

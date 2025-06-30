@@ -61,8 +61,8 @@ pub enum ProcessResult {
 pub struct Layer {
     pub child: Child,                    // The forkable process with all imports loaded
     pub stdin: std::process::ChildStdin, // The stdin of the forkable process
-    pub reader: Option<std::io::Lines<BufReader<std::process::ChildStdout>>>, // The reader of the forkable process
-    pub stderr_reader: Option<std::io::Lines<BufReader<std::process::ChildStderr>>>, // The stderr reader of the forkable process
+    pub reader: Option<Utf8LossyLines<BufReader<std::process::ChildStdout>>>, // The reader of the forkable process
+    pub stderr_reader: Option<Utf8LossyLines<BufReader<std::process::ChildStderr>>>, // The stderr reader of the forkable process
 
     pub forked_processes: Arc<Mutex<HashMap<String, i32>>>, // Map of UUID to PID
     pub forked_names: Arc<Mutex<HashMap<String, String>>>,  // Map of UUID to name
@@ -84,19 +84,63 @@ pub struct Layer {
     pub buffer_output: bool,
 }
 
+/// A custom iterator that reads lines from a BufRead with lossy UTF-8 conversion
+/// This prevents the "stream did not contain valid UTF-8" error by converting
+/// invalid UTF-8 bytes to replacement characters
+pub struct Utf8LossyLines<R> {
+    buf: R,
+}
+
+impl<R: BufRead> Utf8LossyLines<R> {
+    pub fn new(buf: R) -> Self {
+        Self { buf }
+    }
+}
+
+impl<R: BufRead> Iterator for Utf8LossyLines<R> {
+    type Item = std::io::Result<String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut line_bytes = Vec::new();
+
+        match self.buf.read_until(b'\n', &mut line_bytes) {
+            Ok(0) => None, // EOF
+            Ok(_) => {
+                // Convert bytes to string with lossy conversion
+                let line_string = String::from_utf8_lossy(&line_bytes);
+
+                // Remove trailing newline if present
+                let line = if line_string.ends_with('\n') {
+                    let mut trimmed = line_string.into_owned();
+                    trimmed.pop();
+                    if trimmed.ends_with('\r') {
+                        trimmed.pop();
+                    }
+                    trimmed
+                } else {
+                    line_string.into_owned()
+                };
+
+                Some(Ok(line))
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
 impl Layer {
     // New constructor for Layer with shared state
     pub fn new(
         child: Child,
         stdin: std::process::ChildStdin,
-        reader: std::io::Lines<BufReader<std::process::ChildStdout>>,
-        stderr_reader: std::io::Lines<BufReader<std::process::ChildStderr>>,
+        reader: BufReader<std::process::ChildStdout>,
+        stderr_reader: BufReader<std::process::ChildStderr>,
     ) -> Self {
         Self {
             child,
             stdin,
-            reader: Some(reader),
-            stderr_reader: Some(stderr_reader),
+            reader: Some(Utf8LossyLines::new(reader)),
+            stderr_reader: Some(Utf8LossyLines::new(stderr_reader)),
             forked_processes: Arc::new(Mutex::new(HashMap::new())),
             forked_names: Arc::new(Mutex::new(HashMap::new())),
             fork_resolvers: Arc::new(Mutex::new(HashMap::new())),
@@ -114,8 +158,8 @@ impl Layer {
     pub fn new_for_test(
         child: Child,
         stdin: std::process::ChildStdin,
-        reader: std::io::Lines<BufReader<std::process::ChildStdout>>,
-        stderr_reader: std::io::Lines<BufReader<std::process::ChildStderr>>,
+        reader: BufReader<std::process::ChildStdout>,
+        stderr_reader: BufReader<std::process::ChildStderr>,
     ) -> Self {
         let mut layer = Self::new(child, stdin, reader, stderr_reader);
         layer.buffer_output = true;
@@ -157,7 +201,7 @@ impl Layer {
             }
         } else {
             // Print to stdout (default behavior)
-            println!("{}", line);
+            println!("{line}");
         }
     }
 
@@ -242,7 +286,7 @@ impl Layer {
     /// Common function to monitor a stream (stdout or stderr)
     #[allow(clippy::too_many_arguments)]
     fn monitor_stream<R: BufRead>(
-        reader: std::io::Lines<R>,
+        mut reader: Utf8LossyLines<R>,
         stream_name: &str,
         terminate_rx: mpsc::Receiver<()>,
         fork_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ForkResult>>>>,
@@ -254,7 +298,6 @@ impl Layer {
         output_buffer: &Arc<Mutex<Option<OutputBuffer>>>,
     ) {
         info!("Monitor thread for {} started", stream_name);
-        let mut reader = reader;
 
         loop {
             // Check if we've been asked to terminate
@@ -501,8 +544,7 @@ impl Layer {
         } else {
             // Not a message
             Err(format!(
-                "Failed to parse message, received raw content: {}",
-                content
+                "Failed to parse message, received raw content: {content}"
             ))
         }
     }
@@ -617,6 +659,149 @@ impl Layer {
 mod tests {
     use crate::environment::Environment;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_utf8_error_handling() -> Result<(), String> {
+        use crate::layer::Utf8LossyLines;
+        use std::io::BufRead;
+        use std::process::{Command, Stdio};
+
+        // Instead of using the complex environment setup, let's create a simple test
+        // that reproduces the UTF-8 issue by creating a child process that outputs invalid UTF-8
+
+        // Create a simple Python script that outputs invalid UTF-8 bytes
+        let python_code = r#"
+import sys
+import os
+
+# Write invalid UTF-8 bytes directly to stdout
+sys.stdout.buffer.write(b'\xff\xfe\xfd\xfc This is invalid UTF-8\n')
+sys.stdout.buffer.flush()
+
+# Write some valid UTF-8 too
+sys.stdout.write('This is valid UTF-8\n')
+sys.stdout.flush()
+
+# Exit successfully
+sys.exit(0)
+"#;
+
+        // Create a child process that runs our Python code
+        let mut child = Command::new("python")
+            .arg("-c")
+            .arg(python_code)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn Python process: {e}"))?;
+
+        // Get the stdout handle
+        let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
+
+        // Test with standard Lines iterator first (should fail)
+        println!("=== Testing with standard Lines iterator (should fail) ===");
+        let reader = std::io::BufReader::new(stdout);
+        let lines = reader.lines();
+
+        // Try to read lines - this should trigger the UTF-8 error
+        let mut lines_read = 0;
+        let mut utf8_errors = 0;
+        let mut valid_lines = Vec::new();
+
+        for line_result in lines {
+            match line_result {
+                Ok(line) => {
+                    lines_read += 1;
+                    valid_lines.push(line);
+                    println!(
+                        "✅ Successfully read line: {:?}",
+                        valid_lines.last().unwrap()
+                    );
+                }
+                Err(e) => {
+                    utf8_errors += 1;
+                    let error_msg = e.to_string();
+                    println!("❌ Caught UTF-8 error: {error_msg}");
+
+                    // This is the error we're looking for
+                    if error_msg.contains("stream did not contain valid UTF-8") {
+                        println!("✅ Successfully reproduced the UTF-8 error with standard Lines!");
+                        break; // Don't continue since we demonstrated the error
+                    }
+                }
+            }
+        }
+
+        // Wait for child process to complete
+        let _ = child.wait();
+
+        if utf8_errors == 0 {
+            return Err(
+                "Expected to reproduce UTF-8 error with standard Lines, but didn't".to_string(),
+            );
+        }
+
+        // Now test with our new child process using Utf8LossyLines
+        println!("\n=== Testing with Utf8LossyLines iterator (should work) ===");
+
+        let mut child2 = Command::new("python")
+            .arg("-c")
+            .arg(python_code)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn second Python process: {e}"))?;
+
+        let stdout2 = child2.stdout.take().ok_or("Failed to get stdout2")?;
+
+        // Create our new UTF-8 lossy lines iterator
+        let reader2 = std::io::BufReader::new(stdout2);
+        let lossy_lines = Utf8LossyLines::new(reader2);
+
+        let mut lines_read2 = 0;
+        let mut utf8_errors2 = 0;
+        let mut valid_lines2 = Vec::new();
+
+        for line_result in lossy_lines {
+            match line_result {
+                Ok(line) => {
+                    lines_read2 += 1;
+                    valid_lines2.push(line);
+                    println!(
+                        "✅ Successfully read line with lossy UTF-8: {:?}",
+                        valid_lines2.last().unwrap()
+                    );
+                }
+                Err(e) => {
+                    utf8_errors2 += 1;
+                    println!("❌ Unexpected error with Utf8LossyLines: {e}");
+                }
+            }
+        }
+
+        // Wait for child process to complete
+        let _ = child2.wait();
+
+        println!("\n=== Results ===");
+        println!("Standard Lines: {lines_read} lines read, {utf8_errors} UTF-8 errors");
+        println!("Utf8LossyLines: {lines_read2} lines read, {utf8_errors2} UTF-8 errors");
+
+        if utf8_errors2 > 0 {
+            return Err(
+                "Utf8LossyLines should handle invalid UTF-8 gracefully, but got errors".to_string(),
+            );
+        }
+
+        if lines_read2 < 2 {
+            return Err("Expected to read at least 2 lines with Utf8LossyLines".to_string());
+        }
+
+        println!("✅ UTF-8 error handling test passed!");
+        println!("   - Standard Lines iterator fails on invalid UTF-8 (as expected)");
+        println!("   - Utf8LossyLines iterator handles invalid UTF-8 gracefully");
+
+        Ok(())
+    }
 
     #[test]
     fn test_stderr_handling() -> Result<(), String> {
