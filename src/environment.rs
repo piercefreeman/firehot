@@ -97,7 +97,7 @@ impl Environment {
         let third_party_modules = self
             .ast_manager
             .process_all_py_files()
-            .map_err(|e| format!("Failed to process Python files: {}", e))?;
+            .map_err(|e| format!("Failed to process Python files: {e}"))?;
 
         let start_time = Instant::now();
 
@@ -107,7 +107,7 @@ impl Environment {
             third_party_modules.len()
         );
         let mut child = spawn_python_loader(&third_party_modules)
-            .map_err(|e| format!("Failed to spawn Python loader: {}", e))?;
+            .map_err(|e| format!("Failed to spawn Python loader: {e}"))?;
 
         let stdin = child
             .stdin
@@ -191,7 +191,7 @@ impl Environment {
 
         let env_guard = layer
             .lock()
-            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+            .map_err(|e| format!("Failed to lock environment mutex: {e}"))?;
 
         // First, stop all child processes
         info!("Stopping all child processes before terminating main process");
@@ -199,7 +199,7 @@ impl Environment {
             let forked_processes = env_guard
                 .forked_processes
                 .lock()
-                .map_err(|e| format!("Failed to lock forked processes: {}", e))?;
+                .map_err(|e| format!("Failed to lock forked processes: {e}"))?;
 
             // Create a clone of all keys to avoid borrowing issues
             forked_processes.keys().cloned().collect::<Vec<String>>()
@@ -219,16 +219,16 @@ impl Environment {
         // Re-acquire the env_guard
         let mut env_guard = layer
             .lock()
-            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+            .map_err(|e| format!("Failed to lock environment mutex: {e}"))?;
 
         // Now send ExitRequest to the parent process to allow it to clean up gracefully
         info!("Sending ExitRequest to parent process");
         let exit_request = ExitRequest::new();
         let exit_json = serde_json::to_string(&Message::ExitRequest(exit_request))
-            .map_err(|e| format!("Failed to serialize exit request: {}", e))?;
+            .map_err(|e| format!("Failed to serialize exit request: {e}"))?;
 
         // Send the message to the parent process
-        if let Err(e) = writeln!(env_guard.stdin, "{}", exit_json) {
+        if let Err(e) = writeln!(env_guard.stdin, "{exit_json}") {
             warn!("Failed to write exit request to parent stdin: {}", e);
         } else if let Err(e) = env_guard.stdin.flush() {
             warn!("Failed to flush parent stdin: {}", e);
@@ -260,21 +260,21 @@ impl Environment {
         let mut forked_processes = env_guard
             .forked_processes
             .lock()
-            .map_err(|e| format!("Failed to lock forked processes: {}", e))?;
+            .map_err(|e| format!("Failed to lock forked processes: {e}"))?;
         forked_processes.clear();
         drop(forked_processes);
 
         let mut fork_resolvers = env_guard
             .fork_resolvers
             .lock()
-            .map_err(|e| format!("Failed to lock fork resolvers: {}", e))?;
+            .map_err(|e| format!("Failed to lock fork resolvers: {e}"))?;
         fork_resolvers.clear();
         drop(fork_resolvers);
 
         let mut completion_resolvers = env_guard
             .completion_resolvers
             .lock()
-            .map_err(|e| format!("Failed to lock completion resolvers: {}", e))?;
+            .map_err(|e| format!("Failed to lock completion resolvers: {e}"))?;
         completion_resolvers.clear();
         drop(completion_resolvers);
 
@@ -294,7 +294,7 @@ impl Environment {
         let (added, removed) = self
             .ast_manager
             .compute_import_delta()
-            .map_err(|e| format!("Failed to compute import delta: {}", e))?;
+            .map_err(|e| format!("Failed to compute import delta: {e}"))?;
 
         // Check if imports have changed
         if added.is_empty() && removed.is_empty() {
@@ -312,13 +312,13 @@ impl Environment {
             let forked_processes = {
                 let env_guard = env
                     .lock()
-                    .map_err(|e| format!("Failed to lock layer mutex: {}", e))?;
+                    .map_err(|e| format!("Failed to lock layer mutex: {e}"))?;
 
                 // Get the forked processes mutex
                 let forked_processes_guard = env_guard
                     .forked_processes
                     .lock()
-                    .map_err(|e| format!("Failed to lock forked processes: {}", e))?;
+                    .map_err(|e| format!("Failed to lock forked processes: {e}"))?;
 
                 // Create a copy of the process UUIDs
                 forked_processes_guard
@@ -364,14 +364,14 @@ impl Environment {
         // Send the code to the forked process
         let mut env_guard = environment
             .lock()
-            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+            .map_err(|e| format!("Failed to lock environment mutex: {e}"))?;
 
         // Create async resolvers for both fork status and completion
         let fork_resolver = AsyncResolve::new();
         let mut fork_resolvers = env_guard
             .fork_resolvers
             .lock()
-            .map_err(|e| format!("Failed to lock fork resolvers: {}", e))?;
+            .map_err(|e| format!("Failed to lock fork resolvers: {e}"))?;
         fork_resolvers.insert(process_uuid.clone(), fork_resolver.clone());
         drop(fork_resolvers);
 
@@ -379,16 +379,15 @@ impl Environment {
         let mut completion_resolvers = env_guard
             .completion_resolvers
             .lock()
-            .map_err(|e| format!("Failed to lock completion resolvers: {}", e))?;
+            .map_err(|e| format!("Failed to lock completion resolvers: {e}"))?;
         completion_resolvers.insert(process_uuid.clone(), completion_resolver.clone());
         drop(completion_resolvers);
 
         let exec_code = format!(
             r#"
-pickled_str = "{}"
-{}
+pickled_str = "{pickled_data}"
+{PYTHON_CHILD_SCRIPT}
             "#,
-            pickled_data, PYTHON_CHILD_SCRIPT,
         );
 
         // Create a ForkRequest message
@@ -399,15 +398,15 @@ pickled_str = "{}"
         };
 
         let fork_json = serde_json::to_string(&Message::ForkRequest(fork_request))
-            .map_err(|e| format!("Failed to serialize fork request: {}", e))?;
+            .map_err(|e| format!("Failed to serialize fork request: {e}"))?;
 
         // Send the message to the child process
-        writeln!(env_guard.stdin, "{}", fork_json)
-            .map_err(|e| format!("Failed to write to child stdin: {}", e))?;
+        writeln!(env_guard.stdin, "{fork_json}")
+            .map_err(|e| format!("Failed to write to child stdin: {e}"))?;
         env_guard
             .stdin
             .flush()
-            .map_err(|e| format!("Failed to flush child stdin: {}", e))?;
+            .map_err(|e| format!("Failed to flush child stdin: {e}"))?;
 
         // Release the lock so we don't block other operations
         drop(env_guard);
@@ -441,13 +440,13 @@ pickled_str = "{}"
         info!("Stopping isolated process: {}", process_uuid);
         let env_guard = environment
             .lock()
-            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+            .map_err(|e| format!("Failed to lock environment mutex: {e}"))?;
 
         // Check if the process UUID exists
         let forked_processes = env_guard
             .forked_processes
             .lock()
-            .map_err(|e| format!("Failed to lock forked processes: {}", e))?;
+            .map_err(|e| format!("Failed to lock forked processes: {e}"))?;
 
         if !forked_processes.contains_key(process_uuid) {
             warn!("No forked process found with UUID: {}", process_uuid);
@@ -480,21 +479,21 @@ pickled_str = "{}"
         let mut forked_processes = env_guard
             .forked_processes
             .lock()
-            .map_err(|e| format!("Failed to lock forked processes: {}", e))?;
+            .map_err(|e| format!("Failed to lock forked processes: {e}"))?;
         forked_processes.remove(process_uuid);
         drop(forked_processes);
 
         let mut fork_resolvers = env_guard
             .fork_resolvers
             .lock()
-            .map_err(|e| format!("Failed to lock fork resolvers: {}", e))?;
+            .map_err(|e| format!("Failed to lock fork resolvers: {e}"))?;
         fork_resolvers.remove(process_uuid);
         drop(fork_resolvers);
 
         let mut completion_resolvers = env_guard
             .completion_resolvers
             .lock()
-            .map_err(|e| format!("Failed to lock completion resolvers: {}", e))?;
+            .map_err(|e| format!("Failed to lock completion resolvers: {e}"))?;
         completion_resolvers.remove(process_uuid);
         drop(completion_resolvers);
 
@@ -513,19 +512,16 @@ pickled_str = "{}"
 
         let env_guard = environment
             .lock()
-            .map_err(|e| format!("Failed to lock environment mutex: {}", e))?;
+            .map_err(|e| format!("Failed to lock environment mutex: {e}"))?;
 
         // Check if the process exists
         let forked_processes = env_guard
             .forked_processes
             .lock()
-            .map_err(|e| format!("Failed to lock forked processes: {}", e))?;
+            .map_err(|e| format!("Failed to lock forked processes: {e}"))?;
 
         if !forked_processes.contains_key(process_uuid) {
-            return Err(format!(
-                "No forked process found with UUID: {}",
-                process_uuid
-            ));
+            return Err(format!("No forked process found with UUID: {process_uuid}"));
         }
         drop(forked_processes);
 
@@ -533,14 +529,13 @@ pickled_str = "{}"
         let completion_resolvers = env_guard
             .completion_resolvers
             .lock()
-            .map_err(|e| format!("Failed to lock completion resolvers: {}", e))?;
+            .map_err(|e| format!("Failed to lock completion resolvers: {e}"))?;
 
         let completion_resolver = match completion_resolvers.get(process_uuid) {
             Some(resolver) => resolver.clone(),
             None => {
                 return Err(format!(
-                    "No completion resolver found for UUID: {}",
-                    process_uuid
+                    "No completion resolver found for UUID: {process_uuid}"
                 ))
             }
         };
@@ -648,7 +643,7 @@ mod tests {
 
         // Get the PID of the initial Python process
         let initial_pid = runner.layer.as_ref().unwrap().lock().unwrap().child.id();
-        println!("Initial process PID: {:?}", initial_pid);
+        println!("Initial process PID: {initial_pid:?}");
 
         // First, prime the system by calling process_all_py_files to establish a baseline
         let _ = runner.ast_manager.process_all_py_files().unwrap();
@@ -662,15 +657,14 @@ mod tests {
         );
 
         // The environment should NOT have been updated (return false)
-        assert_eq!(
-            no_change_result.unwrap(),
-            false,
+        assert!(
+            !no_change_result.unwrap(),
             "Environment should not have been updated when imports didn't change"
         );
 
         // Get the PID after update with no changes
         let unchanged_pid = runner.layer.as_ref().unwrap().lock().unwrap().child.id();
-        println!("PID after no changes: {:?}", unchanged_pid);
+        println!("PID after no changes: {unchanged_pid:?}");
 
         // Verify that the process was NOT restarted (PIDs should be the same)
         assert_eq!(
@@ -701,7 +695,7 @@ mod tests {
 
         // Get the PID of the new Python process
         let new_pid = runner.layer.as_ref().unwrap().lock().unwrap().child.id();
-        println!("New process PID after import changes: {:?}", new_pid);
+        println!("New process PID after import changes: {new_pid:?}");
     }
 
     #[test]
@@ -749,14 +743,13 @@ def main():
 
         // The result should be our timestamp string
         let result_str = result_option.unwrap();
-        println!("Result from time.time(): {}", result_str);
+        println!("Result from time.time(): {result_str}");
 
         // Try to parse the result as a float to verify it's a valid timestamp
         let parsed_result = result_str.parse::<f64>();
         assert!(
             parsed_result.is_ok(),
-            "Failed to parse result as a float: {}",
-            result_str
+            "Failed to parse result as a float: {result_str}"
         );
 
         // Clean up by stopping the isolated process
@@ -813,7 +806,7 @@ def main():
             );
 
             let pid = *forked_processes.get(&test_uuid).unwrap();
-            println!("Process PID: {}", pid);
+            println!("Process PID: {pid}");
             drop(forked_processes);
         }
 
@@ -905,7 +898,7 @@ def main():
         let result = runner.communicate_isolated(&process_uuid);
 
         // Verify that we got an error
-        assert!(result.is_err(), "Expected an error but got: {:?}", result);
+        assert!(result.is_err(), "Expected an error but got: {result:?}");
 
         // Get the error message
         let error_message = result.err().unwrap();
@@ -913,16 +906,14 @@ def main():
         // The error should contain the specific error message
         assert!(
             error_message.contains("This is a custom error message"),
-            "Error should contain the custom error message but got: {}",
-            error_message
+            "Error should contain the custom error message but got: {error_message}"
         );
 
         // The error should contain traceback information
         assert!(
             error_message.contains("Traceback")
                 || error_message.contains("function_that_raises_error"),
-            "Error should contain traceback information but got: {}",
-            error_message
+            "Error should contain traceback information but got: {error_message}"
         );
 
         // Clean up

@@ -259,7 +259,7 @@ pub mod io {
         message: &M,
     ) -> std::io::Result<()> {
         let json = serde_json::to_string(message)?;
-        writeln!(writer, "{}", json)?;
+        writeln!(writer, "{json}")?;
         Ok(())
     }
 
@@ -288,7 +288,7 @@ mod tests {
         // Wrap the inner struct in the Message enum so that the "name" tag is added.
         let msg = Message::ImportComplete(ImportComplete::new());
         let serialized = serde_json::to_string(&msg).unwrap();
-        println!("Serialized ImportComplete: {}", serialized);
+        println!("Serialized ImportComplete: {serialized}");
         // Expected output includes "IMPORT_COMPLETE" as the tag.
         assert!(serialized.contains("IMPORT_COMPLETE"));
     }
@@ -319,7 +319,7 @@ mod tests {
         if let Ok(message) = parsed {
             match message {
                 Message::ImportComplete(_) => (), // Success
-                _ => panic!("Parsed to wrong variant: {:?}", message),
+                _ => panic!("Parsed to wrong variant: {message:?}"),
             }
         }
     }

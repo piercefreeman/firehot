@@ -20,9 +20,9 @@ pub enum MultiplexedLogLineError {
 impl std::fmt::Display for MultiplexedLogLineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidFormat(msg) => write!(f, "Invalid log format: {}", msg),
-            Self::PidParseError(err) => write!(f, "Failed to parse PID: {}", err),
-            Self::MissingComponent(msg) => write!(f, "Missing component: {}", msg),
+            Self::InvalidFormat(msg) => write!(f, "Invalid log format: {msg}"),
+            Self::PidParseError(err) => write!(f, "Failed to parse PID: {err}"),
+            Self::MissingComponent(msg) => write!(f, "Missing component: {msg}"),
         }
     }
 }
@@ -68,8 +68,7 @@ pub fn parse_multiplexed_line(line: &str) -> Result<MultiplexedLogLine, Multiple
 
     if parts.len() != 2 {
         return Err(MultiplexedLogLineError::InvalidFormat(format!(
-            "Expected format [PID:pid:stream_name], got [PID:{}]",
-            prefix
+            "Expected format [PID:pid:stream_name], got [PID:{prefix}]"
         )));
     }
 
