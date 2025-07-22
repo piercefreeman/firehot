@@ -250,21 +250,21 @@ def test_execute_dynamic_imports(caplog: LogCaptureFixture) -> None:
     logger = logging.getLogger()
 
     # Test empty input
-    execute_dynamic_imports("", logger)
+    execute_dynamic_imports("", logger, {})
     assert len(caplog.records) == 0
 
     # Test invalid JSON
     with pytest.raises(SystemExit):
-        execute_dynamic_imports("invalid json", logger)
+        execute_dynamic_imports("invalid json", logger, {})
 
     # Test invalid type (not a list)
     with pytest.raises(SystemExit):
-        execute_dynamic_imports('{"not": "a list"}', logger)
+        execute_dynamic_imports('{"not": "a list"}', logger, {})
 
     # Test valid list of imports
     with patch("firehot.embedded.parent_entrypoint.track_and_execute_import") as mock_import:
         modules = ["json", "sys", "os"]
-        execute_dynamic_imports(json.dumps(modules), logger)
+        execute_dynamic_imports(json.dumps(modules), logger, {})
 
         # Verify each module was imported
         assert mock_import.call_count == len(modules)

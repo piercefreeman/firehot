@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use owo_colors::OwoColorize;
 use serde_json::{self};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -102,11 +102,14 @@ impl Environment {
         let start_time = Instant::now();
 
         // Spawn Python subprocess to load modules
+        // Get module locations for error reporting
+        let module_locations = self.ast_manager.get_module_locations();
+
         info!(
             "Spawning Python subprocess to load {} modules",
             third_party_modules.len()
         );
-        let mut child = spawn_python_loader(&third_party_modules)
+        let mut child = spawn_python_loader(&third_party_modules, &module_locations)
             .map_err(|e| format!("Failed to spawn Python loader: {e}"))?;
 
         let stdin = child
@@ -566,17 +569,26 @@ pickled_str = "{pickled_data}"
 /// Spawn a Python process that imports the given modules and then waits for commands on stdin.
 /// The Python process prints "IMPORTS_LOADED" to stdout once all imports are complete.
 /// After that, it will listen for commands on stdin, which can include fork requests and code to execute.
-fn spawn_python_loader(modules: &HashSet<String>) -> Result<Child> {
+fn spawn_python_loader(
+    modules: &HashSet<String>,
+    module_locations: &HashMap<String, Vec<crate::ast::SourceLocation>>,
+) -> Result<Child> {
     // Convert modules to a JSON list of module names
     let import_json = serde_json::to_string(&Vec::from_iter(modules.iter().cloned()))
         .map_err(|e| anyhow!("Failed to serialize module names: {}", e))?;
 
     debug!("Module import JSON: {}", import_json);
 
+    // Convert module locations to JSON
+    let locations_json = serde_json::to_string(&module_locations)
+        .map_err(|e| anyhow!("Failed to serialize module locations: {}", e))?;
+    debug!("Module locations JSON: {}", locations_json);
+
     // Spawn Python process with all modules pre-imported
     let child = Command::new("python")
         .args(["-c", PYTHON_LOADER_SCRIPT])
         .arg(import_json)
+        .arg(locations_json)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -930,7 +942,7 @@ import time
 
 def main():
     # Sleep for a while to simulate a long-running process
-    for i in range(10):
+    for i in range(5):
         time.sleep(0.1)
     return "Long running process completed"
         "#;
@@ -966,8 +978,8 @@ def main():
             .exec_isolated(&pickled_long_running, "long-runner-2")
             .expect("Failed to execute second function");
 
-        // Give it a moment to complete
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+        // Give it enough time to complete (0.5s script execution + overhead)
+        std::thread::sleep(std::time::Duration::from_millis(2000));
 
         // Verify we can communicate with the second process
         let result = runner

@@ -534,6 +534,20 @@ impl Layer {
                     error!("Monitor thread received unknown error: {}", error.error);
                     Ok(())
                 }
+                Message::ImportError(error) => {
+                    // Import errors occur during initialization and should be fatal
+                    error!("Monitor thread received import error:\n{}", error.error);
+                    if let Some(traceback) = &error.traceback {
+                        error!("Import error traceback:\n{}", traceback);
+                    }
+                    // Exit the process with error code to indicate import failure
+                    std::process::exit(1);
+                }
+                Message::ImportComplete(_) => {
+                    // Import completion is informational
+                    info!("Monitor thread received import complete message");
+                    Ok(())
+                }
                 _ => {
                     // We should have a handler implemented for all messages types, capture the
                     // unknown ones

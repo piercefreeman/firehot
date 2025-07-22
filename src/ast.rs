@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use log::{debug, info, trace};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -32,6 +33,23 @@ pub struct ImportInfo {
     /// of initialization dependencies. We track the level of the import here so we can
     /// make sure to load root packages before nested packages.
     pub import_level: u32,
+    /// Source location information for this import
+    pub location: SourceLocation,
+}
+
+/// Source location information for an import
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceLocation {
+    /// Path to the file containing the import
+    pub file_path: String,
+    /// Line number where the import starts (1-indexed)
+    pub line: usize,
+    /// Column where the import starts (1-indexed)
+    pub column: usize,
+    /// Optional end line for multi-line imports
+    pub end_line: Option<usize>,
+    /// Optional end column
+    pub end_column: Option<usize>,
 }
 
 /// Manage AST parsing and import tracking for a project
@@ -76,6 +94,24 @@ impl ProjectAstManager {
     /// Get the project path
     pub fn get_project_path(&self) -> &str {
         &self.project_path
+    }
+
+    /// Get a mapping of module names to their source locations
+    pub fn get_module_locations(&self) -> HashMap<String, Vec<SourceLocation>> {
+        let mut module_locations: HashMap<String, Vec<SourceLocation>> = HashMap::new();
+
+        for imports in self.file_imports.values() {
+            for import in imports {
+                if self.is_third_party_import(import) {
+                    module_locations
+                        .entry(import.module.clone())
+                        .or_default()
+                        .push(import.location.clone());
+                }
+            }
+        }
+
+        module_locations
     }
 
     /// Process all Python files in the project and extract third-party imports.
@@ -206,7 +242,7 @@ impl ProjectAstManager {
         };
 
         // Collect imports
-        let imports = collect_imports(stmts);
+        let imports = collect_imports(stmts, file_path, &source);
         debug!("Collected {} imports from {}", imports.len(), file_path);
 
         // Update caches
@@ -248,13 +284,18 @@ impl ProjectAstManager {
 /// Recursively traverse AST statements to collect import information.
 /// This does a nested traversal though all the possible imports in a file, like those
 /// embedded within functions.
-pub fn collect_imports(stmts: &[Stmt]) -> Vec<ImportInfo> {
-    collect_imports_with_level(stmts, 0)
+pub fn collect_imports(stmts: &[Stmt], file_path: &str, source: &str) -> Vec<ImportInfo> {
+    collect_imports_with_level(stmts, 0, file_path, source)
 }
 
 /// Internal function that tracks the nesting level of imports.
 /// Level 0 is the top level of the module, and it increases with each nesting.
-fn collect_imports_with_level(stmts: &[Stmt], level: u32) -> Vec<ImportInfo> {
+fn collect_imports_with_level(
+    stmts: &[Stmt],
+    level: u32,
+    file_path: &str,
+    source: &str,
+) -> Vec<ImportInfo> {
     let mut imports = Vec::new();
     for stmt in stmts {
         trace!("Processing statement: {:?}", stmt);
@@ -268,6 +309,13 @@ fn collect_imports_with_level(stmts: &[Stmt], level: u32) -> Vec<ImportInfo> {
                         is_relative: false,
                         is_from_import: false,
                         import_level: level,
+                        location: SourceLocation {
+                            file_path: file_path.to_string(),
+                            line: get_line_number_for_import(source, &alias.name),
+                            column: 1,
+                            end_line: None,
+                            end_column: None,
+                        },
                     });
                 }
             }
@@ -289,6 +337,13 @@ fn collect_imports_with_level(stmts: &[Stmt], level: u32) -> Vec<ImportInfo> {
                         is_relative: import_from.level.is_some_and(|level| level.to_u32() > 0),
                         is_from_import: true,
                         import_level: level,
+                        location: SourceLocation {
+                            file_path: file_path.to_string(),
+                            line: get_line_number_for_import(source, module_name),
+                            column: 1,
+                            end_line: None,
+                            end_column: None,
+                        },
                     });
                 } else {
                     // Handle case where module is None (likely for relative imports like "from . import x")
@@ -305,42 +360,118 @@ fn collect_imports_with_level(stmts: &[Stmt], level: u32) -> Vec<ImportInfo> {
                         let module_name = ".".repeat(rel_level as usize);
                         debug!("Created relative import with module: {}", module_name);
                         imports.push(ImportInfo {
-                            module: module_name,
+                            module: module_name.clone(),
                             names: imported,
                             is_relative: true,
                             is_from_import: true,
                             import_level: level,
+                            location: SourceLocation {
+                                file_path: file_path.to_string(),
+                                line: get_line_number_for_relative_import(source, rel_level),
+                                column: 1,
+                                end_line: None,
+                                end_column: None,
+                            },
                         });
                     }
                 }
             }
             Stmt::If(inner) => {
                 let if_stmt: &StmtIf = inner;
-                imports.extend(collect_imports_with_level(&if_stmt.body, level + 1));
-                imports.extend(collect_imports_with_level(&if_stmt.orelse, level + 1));
+                imports.extend(collect_imports_with_level(
+                    &if_stmt.body,
+                    level + 1,
+                    file_path,
+                    source,
+                ));
+                imports.extend(collect_imports_with_level(
+                    &if_stmt.orelse,
+                    level + 1,
+                    file_path,
+                    source,
+                ));
             }
             Stmt::While(inner) => {
                 let while_stmt: &StmtWhile = inner;
-                imports.extend(collect_imports_with_level(&while_stmt.body, level + 1));
-                imports.extend(collect_imports_with_level(&while_stmt.orelse, level + 1));
+                imports.extend(collect_imports_with_level(
+                    &while_stmt.body,
+                    level + 1,
+                    file_path,
+                    source,
+                ));
+                imports.extend(collect_imports_with_level(
+                    &while_stmt.orelse,
+                    level + 1,
+                    file_path,
+                    source,
+                ));
             }
             Stmt::FunctionDef(inner) => {
                 let func_def: &StmtFunctionDef = inner;
-                imports.extend(collect_imports_with_level(&func_def.body, level + 1));
+                imports.extend(collect_imports_with_level(
+                    &func_def.body,
+                    level + 1,
+                    file_path,
+                    source,
+                ));
             }
             Stmt::AsyncFunctionDef(inner) => {
                 let func_def: &StmtAsyncFunctionDef = inner;
-                imports.extend(collect_imports_with_level(&func_def.body, level + 1));
+                imports.extend(collect_imports_with_level(
+                    &func_def.body,
+                    level + 1,
+                    file_path,
+                    source,
+                ));
             }
             Stmt::ClassDef(inner) => {
                 let class_def: &StmtClassDef = inner;
-                imports.extend(collect_imports_with_level(&class_def.body, level + 1));
+                imports.extend(collect_imports_with_level(
+                    &class_def.body,
+                    level + 1,
+                    file_path,
+                    source,
+                ));
             }
             _ => {}
         }
     }
     info!("Collected imports: {:?}", imports);
     imports
+}
+
+/// Helper function to find the line number where a module is imported
+/// This is a simple implementation that searches for the import statement in the source
+fn get_line_number_for_import(source: &str, module_name: &str) -> usize {
+    let lines: Vec<&str> = source.lines().collect();
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        // Check for "import module_name" or "from module_name import"
+        if (trimmed.starts_with("import ") && trimmed.contains(module_name))
+            || (trimmed.starts_with("from ") && trimmed.contains(&format!("{module_name} ")))
+        {
+            return idx + 1; // Line numbers are 1-indexed
+        }
+    }
+
+    1 // Default to line 1 if not found
+}
+
+/// Helper function to find the line number for relative imports
+fn get_line_number_for_relative_import(source: &str, rel_level: u32) -> usize {
+    let lines: Vec<&str> = source.lines().collect();
+    let dots = ".".repeat(rel_level as usize);
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        // Check for "from . import" or "from .. import" etc.
+        if trimmed.starts_with("from ") && trimmed.contains(&format!("from {dots} ")) {
+            return idx + 1; // Line numbers are 1-indexed
+        }
+    }
+
+    1 // Default to line 1 if not found
 }
 
 #[cfg(test)]
@@ -399,7 +530,7 @@ mod tests {
             _ => panic!("Expected Module"),
         };
 
-        let imports = collect_imports(stmts);
+        let imports = collect_imports(stmts, "imports.py", &source);
 
         assert_eq!(imports.len(), 2);
         assert_eq!(imports[0].module, "os");
@@ -427,7 +558,7 @@ mod tests {
             _ => panic!("Expected Module"),
         };
 
-        let imports = collect_imports(stmts);
+        let imports = collect_imports(stmts, "from_imports.py", &source);
 
         assert_eq!(imports.len(), 2);
         assert_eq!(imports[0].module, "os");
@@ -455,7 +586,7 @@ mod tests {
             _ => panic!("Expected Module"),
         };
 
-        let imports = collect_imports(stmts);
+        let imports = collect_imports(stmts, "alias_imports.py", &source);
 
         assert_eq!(imports.len(), 2);
         assert_eq!(imports[0].module, "os");
@@ -483,7 +614,7 @@ mod tests {
             _ => panic!("Expected Module"),
         };
 
-        let imports = collect_imports(stmts);
+        let imports = collect_imports(stmts, "relative_imports.py", &source);
 
         // Debugging to understand the actual structure
         println!("Relative imports found: {imports:#?}");
@@ -525,7 +656,7 @@ def function():
             _ => panic!("Expected Module"),
         };
 
-        let imports = collect_imports(stmts);
+        let imports = collect_imports(stmts, "nested_imports.py", &source);
 
         // Should find all nested imports
         assert_eq!(imports.len(), 4);
@@ -567,7 +698,7 @@ def function():
             _ => panic!("Expected Module"),
         };
 
-        let imports = collect_imports(stmts);
+        let imports = collect_imports(stmts, "time_imports.py", &source);
 
         assert_eq!(imports.len(), 2);
 
@@ -595,6 +726,13 @@ def function():
             is_relative: false,
             is_from_import: false,
             import_level: 0,
+            location: SourceLocation {
+                file_path: "test.py".to_string(),
+                line: 1,
+                column: 1,
+                end_line: None,
+                end_column: None,
+            },
         };
         assert!(!manager.is_third_party_import(&first_party));
 
@@ -605,6 +743,13 @@ def function():
             is_relative: true,
             is_from_import: false,
             import_level: 0,
+            location: SourceLocation {
+                file_path: "test.py".to_string(),
+                line: 1,
+                column: 1,
+                end_line: None,
+                end_column: None,
+            },
         };
         assert!(!manager.is_third_party_import(&relative));
 
@@ -615,6 +760,13 @@ def function():
             is_relative: false,
             is_from_import: false,
             import_level: 0,
+            location: SourceLocation {
+                file_path: "test.py".to_string(),
+                line: 1,
+                column: 1,
+                end_line: None,
+                end_column: None,
+            },
         };
         assert!(manager.is_third_party_import(&third_party));
     }
@@ -715,6 +867,55 @@ def function():
 
         assert!(!removed.is_empty());
         assert!(removed.contains("requests"));
+    }
+
+    #[test]
+    fn test_import_location_tracking() {
+        let python_code = r#"import os
+import sys
+
+from datetime import datetime
+
+def function():
+    import json  # This is on line 7
+
+    if True:
+        from requests import get  # Line 10
+"#;
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = create_temp_py_file(&temp_dir, "location_test.py", python_code);
+
+        let source = fs::read_to_string(&file_path).unwrap();
+        let parsed = parse(&source, Mode::Module, "location_test.py").unwrap();
+
+        let stmts = match &parsed {
+            Mod::Module(module) => &module.body,
+            _ => panic!("Expected Module"),
+        };
+
+        let imports = collect_imports(stmts, "location_test.py", &source);
+
+        // Check that we found all imports
+        assert_eq!(imports.len(), 5);
+
+        // Find specific imports and check their line numbers
+        let os_import = imports.iter().find(|i| i.module == "os").unwrap();
+        assert_eq!(os_import.location.line, 1);
+        assert_eq!(os_import.location.file_path, "location_test.py");
+
+        let sys_import = imports.iter().find(|i| i.module == "sys").unwrap();
+        assert_eq!(sys_import.location.line, 2);
+
+        let datetime_import = imports.iter().find(|i| i.module == "datetime").unwrap();
+        assert_eq!(datetime_import.location.line, 4);
+
+        let json_import = imports.iter().find(|i| i.module == "json").unwrap();
+        assert_eq!(json_import.location.line, 7);
+        assert_eq!(json_import.import_level, 1); // Inside a function
+
+        let requests_import = imports.iter().find(|i| i.module == "requests").unwrap();
+        assert_eq!(requests_import.location.line, 10);
+        assert_eq!(requests_import.import_level, 2); // Inside function and if block
     }
 
     #[test]
