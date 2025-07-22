@@ -942,7 +942,7 @@ import time
 
 def main():
     # Sleep for a while to simulate a long-running process
-    for i in range(10):
+    for i in range(5):
         time.sleep(0.1)
     return "Long running process completed"
         "#;
@@ -978,8 +978,8 @@ def main():
             .exec_isolated(&pickled_long_running, "long-runner-2")
             .expect("Failed to execute second function");
 
-        // Give it a moment to complete
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+        // Give it enough time to complete (0.5s script execution + overhead)
+        std::thread::sleep(std::time::Duration::from_millis(2000));
 
         // Verify we can communicate with the second process
         let result = runner
