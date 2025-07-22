@@ -425,7 +425,52 @@ def track_and_execute_import(module_name: str, firehot_logger: logging.Logger) -
         )
 
 
-def execute_dynamic_imports(dynamic_imports: str, firehot_logger: logging.Logger) -> None:
+def pretty_print_import_error(error: Exception, module_name: str, module_locations: dict) -> str:
+    """
+    Pretty print an import error with source locations where the module is imported.
+
+    :param error: The import error that occurred
+    :param module_name: The name of the module that failed to import
+    :param module_locations: Dictionary mapping module names to their source locations
+    :return: A formatted error message with source locations
+    """
+    error_lines = [f"ImportError: {str(error)}"]
+
+    locations = module_locations.get(module_name, [])
+    if locations:
+        error_lines.append(f"\nModule '{module_name}' is imported in the following locations:")
+        for loc in locations:
+            file_path = loc.get("file_path", "unknown")
+            line = loc.get("line", 0)
+
+            # Try to read the source file to show the import line
+            try:
+                with open(file_path, "r") as f:
+                    lines = f.readlines()
+                    if 0 < line <= len(lines):
+                        # Show a few lines of context
+                        start_line = max(0, line - 3)
+                        end_line = min(len(lines), line + 2)
+
+                        error_lines.append(f'\n  File "{file_path}", line {line}:')
+                        for i in range(start_line, end_line):
+                            line_num = i + 1
+                            line_content = lines[i].rstrip()
+                            if line_num == line:
+                                error_lines.append(f"  > {line_num:4d} | {line_content}")
+                            else:
+                                error_lines.append(f"    {line_num:4d} | {line_content}")
+                    else:
+                        error_lines.append(f'\n  File "{file_path}", line {line}')
+            except (IOError, OSError):
+                error_lines.append(f'\n  File "{file_path}", line {line}')
+
+    return "\n".join(error_lines)
+
+
+def execute_dynamic_imports(
+    dynamic_imports: str, firehot_logger: logging.Logger, module_locations: dict
+) -> None:
     """
     Parse and execute a list of dynamic imports, tracking thread creation for each import.
 
@@ -452,17 +497,26 @@ def execute_dynamic_imports(dynamic_imports: str, firehot_logger: logging.Logger
         try:
             track_and_execute_import(module_name, firehot_logger)
         except Exception as e:
-            write_message(ImportError(error=str(e), traceback=format_exc()))
+            # Create a pretty error message with source locations
+            pretty_error = pretty_print_import_error(e, module_name, module_locations)
+            write_message(ImportError(error=pretty_error, traceback=format_exc()))
             sys.exit(1)
 
 
 def main():
     dynamic_imports = sys.argv[1] if len(sys.argv) > 1 else ""
+    module_locations_json = sys.argv[2] if len(sys.argv) > 2 else "{}"
     firehot_logger = build_firehot_logger()
+
+    # Parse module locations for error reporting
+    try:
+        module_locations = json_loads(module_locations_json)
+    except (JSONDecodeError, ValueError):
+        module_locations = {}
 
     # Execute the dynamic imports
     try:
-        execute_dynamic_imports(dynamic_imports, firehot_logger)
+        execute_dynamic_imports(dynamic_imports, firehot_logger, module_locations)
     except Exception as e:
         write_message(ImportError(error=str(e), traceback=format_exc()))
         sys.exit(1)
