@@ -2,7 +2,7 @@ use anstream::eprintln;
 use log::{debug, error, info};
 use once_cell::sync::Lazy;
 use owo_colors::OwoColorize;
-use std::{collections::HashMap, time::Instant};
+use std::{collections::HashMap, ffi::CString, time::Instant};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -18,6 +18,7 @@ pub mod layer;
 pub mod messages;
 pub mod multiplex_logs;
 pub mod process;
+pub mod python;
 pub mod scripts;
 pub mod test_utils;
 
@@ -28,10 +29,14 @@ use scripts::PYTHON_CALL_SCRIPT;
 // Replace RUNNERS and other new collections with IMPORT_RUNNERS
 static ENVIRONMENTS: Lazy<Mutex<HashMap<String, environment::Environment>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+static PYTHON_CALL_SCRIPT_CSTR: Lazy<CString> = Lazy::new(|| {
+    CString::new(PYTHON_CALL_SCRIPT)
+        .expect("embedded Python serializer script contained a NUL byte")
+});
 
 /// Python module for hot reloading with isolated imports
 #[pymodule]
-fn firehot(_py: Python, m: &PyModule) -> PyResult<()> {
+fn firehot(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // No need to register the custom exception
     // m.add("ChildException", _py.get_type::<ChildException>())?;
 
@@ -88,7 +93,7 @@ fn firehot(_py: Python, m: &PyModule) -> PyResult<()> {
 /// Initialize and start the import runner, returning a unique identifier
 #[pyfunction]
 fn start_import_runner(
-    _py: Python,
+    _py: Python<'_>,
     project_name: &str,
     package_path: &str,
     ignored_modules: Option<Vec<String>>,
@@ -126,7 +131,7 @@ fn start_import_runner(
 
 /// Update the environment by checking for import changes and restarting if necessary
 #[pyfunction]
-fn update_environment(_py: Python, env_id: &str) -> PyResult<bool> {
+fn update_environment(_py: Python<'_>, env_id: &str) -> PyResult<bool> {
     // Get the ImportRunner
     info!("Updating environment for runner: {}", env_id);
     let mut environments = ENVIRONMENTS.lock().unwrap();
@@ -157,7 +162,7 @@ fn update_environment(_py: Python, env_id: &str) -> PyResult<bool> {
 
 /// Stop the import runner with the given ID
 #[pyfunction]
-fn stop_import_runner(_py: Python, env_id: &str) -> PyResult<()> {
+fn stop_import_runner(_py: Python<'_>, env_id: &str) -> PyResult<()> {
     // Beautiful logging for stopping the import runner
     eprintln!(
         "\n{} {}\n",
@@ -200,13 +205,13 @@ fn stop_import_runner(_py: Python, env_id: &str) -> PyResult<()> {
 
 /// Execute a Python function in an isolated process
 #[pyfunction]
-fn exec_isolated<'py>(
-    py: Python<'py>,
+fn exec_isolated(
+    py: Python<'_>,
     env_id: &str,
     name: &str,
-    func: PyObject,
-    args: Option<PyObject>,
-) -> PyResult<&'py PyAny> {
+    func: Py<PyAny>,
+    args: Option<Py<PyAny>>,
+) -> PyResult<String> {
     debug!(
         "Executing function in isolated process for runner: {}",
         env_id
@@ -217,11 +222,15 @@ fn exec_isolated<'py>(
     locals.set_item("func", func)?;
     locals.set_item("args", args.unwrap_or_else(|| py.None()))?;
 
-    py.run(PYTHON_CALL_SCRIPT, None, Some(locals))?;
+    py.run(PYTHON_CALL_SCRIPT_CSTR.as_c_str(), None, Some(&locals))?;
 
     // Get the pickled data - now it's a string because we decoded it in Python
     let pickled_data = locals
         .get_item("pickled_data")
+        .map_err(|err| {
+            error!("Failed to look up pickled payload: {}", err);
+            err
+        })?
         .ok_or_else(|| {
             let err_msg = "Failed to pickle function and args";
             error!("{}", err_msg);
@@ -235,7 +244,7 @@ fn exec_isolated<'py>(
         match environment.exec_isolated(&pickled_data, name) {
             Ok(result) => {
                 debug!("Function executed successfully in isolated process");
-                Ok(py.eval(&format!("'{result}'"), None, None)?)
+                Ok(result)
             }
             Err(err) => {
                 error!("Error executing function in isolated process: {}", err);
@@ -251,7 +260,7 @@ fn exec_isolated<'py>(
 
 /// Stop an isolated process
 #[pyfunction]
-fn stop_isolated(_py: Python, env_id: &str, process_uuid: &str) -> PyResult<bool> {
+fn stop_isolated(_py: Python<'_>, env_id: &str, process_uuid: &str) -> PyResult<bool> {
     info!(
         "Stopping isolated process {} for runner {}",
         process_uuid, env_id
@@ -272,7 +281,11 @@ fn stop_isolated(_py: Python, env_id: &str, process_uuid: &str) -> PyResult<bool
 
 /// Get output from an isolated process
 #[pyfunction]
-fn communicate_isolated(_py: Python, env_id: &str, process_uuid: &str) -> PyResult<Option<String>> {
+fn communicate_isolated(
+    _py: Python<'_>,
+    env_id: &str,
+    process_uuid: &str,
+) -> PyResult<Option<String>> {
     debug!(
         "Communicating with isolated process {} for environment {}",
         process_uuid, env_id

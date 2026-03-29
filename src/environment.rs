@@ -1,11 +1,13 @@
 use anstream::eprintln;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use log::{debug, error, info, warn};
 use owo_colors::OwoColorize;
 use serde_json::{self};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::{BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::path::PathBuf;
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -16,6 +18,7 @@ use crate::ast::ProjectAstManager;
 use crate::async_resolve::AsyncResolve;
 use crate::layer::{ForkResult, Layer, ProcessResult};
 use crate::messages::{ExitRequest, ForkRequest, Message};
+use crate::python::{extra_python_paths, python_command};
 use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
 
 /// Runner for isolated Python code execution
@@ -104,12 +107,17 @@ impl Environment {
         // Spawn Python subprocess to load modules
         // Get module locations for error reporting
         let module_locations = self.ast_manager.get_module_locations();
+        let python_path = build_pythonpath(
+            self.ast_manager.get_package_name(),
+            self.ast_manager.get_project_path(),
+        )
+        .map_err(|e| format!("Failed to build PYTHONPATH: {e}"))?;
 
         info!(
             "Spawning Python subprocess to load {} modules",
             third_party_modules.len()
         );
-        let mut child = spawn_python_loader(&third_party_modules, &module_locations)
+        let mut child = spawn_python_loader(&third_party_modules, &module_locations, &python_path)
             .map_err(|e| format!("Failed to spawn Python loader: {e}"))?;
 
         let stdin = child
@@ -539,7 +547,7 @@ pickled_str = "{pickled_data}"
             None => {
                 return Err(format!(
                     "No completion resolver found for UUID: {process_uuid}"
-                ))
+                ));
             }
         };
         drop(completion_resolvers);
@@ -572,6 +580,7 @@ pickled_str = "{pickled_data}"
 fn spawn_python_loader(
     modules: &HashSet<String>,
     module_locations: &HashMap<String, Vec<crate::ast::SourceLocation>>,
+    python_path: &OsString,
 ) -> Result<Child> {
     // Convert modules to a JSON list of module names
     let import_json = serde_json::to_string(&Vec::from_iter(modules.iter().cloned()))
@@ -585,7 +594,8 @@ fn spawn_python_loader(
     debug!("Module locations JSON: {}", locations_json);
 
     // Spawn Python process with all modules pre-imported
-    let child = Command::new("python")
+    let child = python_command()
+        .env("PYTHONPATH", python_path)
         .args(["-c", PYTHON_LOADER_SCRIPT])
         .arg(import_json)
         .arg(locations_json)
@@ -596,6 +606,39 @@ fn spawn_python_loader(
         .map_err(|e| anyhow!("Failed to spawn Python process: {}", e))?;
 
     Ok(child)
+}
+
+fn build_pythonpath(project_name: &str, project_path: &str) -> Result<OsString> {
+    let mut paths = std::env::var_os("PYTHONPATH")
+        .into_iter()
+        .flat_map(|python_path| std::env::split_paths(&python_path).collect::<Vec<_>>())
+        .collect::<Vec<PathBuf>>();
+
+    push_pythonpath_entry(&mut paths, PathBuf::from(project_path));
+    push_pythonpath_entry(&mut paths, derive_import_root(project_name, project_path));
+    for extra_path in extra_python_paths() {
+        push_pythonpath_entry(&mut paths, extra_path);
+    }
+
+    std::env::join_paths(paths).map_err(|e| anyhow!("Failed to join PYTHONPATH: {}", e))
+}
+
+fn push_pythonpath_entry(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !path.as_os_str().is_empty() && !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+fn derive_import_root(project_name: &str, project_path: &str) -> PathBuf {
+    let mut import_root = PathBuf::from(project_path);
+    for _ in project_name.split('.') {
+        if let Some(parent) = import_root.parent() {
+            import_root = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+    import_root
 }
 
 #[cfg(test)]

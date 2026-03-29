@@ -56,7 +56,7 @@ pub fn parse_multiplexed_line(line: &str) -> Result<MultiplexedLogLine, Multiple
         None => {
             return Err(MultiplexedLogLineError::InvalidFormat(
                 "Missing closing bracket after prefix".to_string(),
-            ))
+            ));
         }
     };
 
