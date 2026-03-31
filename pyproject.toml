@@ -27,6 +27,13 @@ dev = [
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+module-name = "firehot._core"
+python-packages = ["firehot"]
+python-source = "src"
+exclude = ["**/__tests__/**"]
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
 
 [tool.ruff]
 target-version = "py310"

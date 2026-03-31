@@ -26,12 +26,14 @@ from time import sleep
 from traceback import format_exc, format_stack
 
 try:
-    from firehot.firehot import get_total_thread_count
+    from firehot._core import get_total_thread_count
 except ImportError:
+
     def get_total_thread_count() -> int:
         """Best-effort fallback when the Rust extension module is unavailable."""
 
         return threading.active_count()
+
 
 try:
     from enum import StrEnum

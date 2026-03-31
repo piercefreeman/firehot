@@ -4,13 +4,13 @@ import importlib.util
 from contextlib import contextmanager
 from pathlib import Path
 
-from firehot.environment import Environment
-from firehot.firehot import (
+from firehot._core import (
     start_import_runner as start_import_runner_rs,
 )
-from firehot.firehot import (
+from firehot._core import (
     stop_import_runner as stop_import_runner_rs,
 )
+from firehot.environment import Environment
 
 
 def resolve_package_metadata(package: str) -> tuple[str, str]:

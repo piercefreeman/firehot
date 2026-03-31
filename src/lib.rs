@@ -36,6 +36,7 @@ static PYTHON_CALL_SCRIPT_CSTR: Lazy<CString> = Lazy::new(|| {
 
 /// Python module for hot reloading with isolated imports
 #[pymodule]
+#[pyo3(name = "_core")]
 fn firehot(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // No need to register the custom exception
     // m.add("ChildException", _py.get_type::<ChildException>())?;
