@@ -4,12 +4,12 @@ injected scripts need to be run standalone.
 
 """
 
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 SerializedCall = TypedDict(
     "SerializedCall",
     {
-        "func_module_path": Optional[str],
+        "func_module_path": str | None,
         "func_name": str,
         "func_qualname": str,
         "args": tuple,
