@@ -651,12 +651,82 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
 
+    struct ExtraPythonPathGuard {
+        path: PathBuf,
+    }
+
+    impl ExtraPythonPathGuard {
+        fn register(path: PathBuf) -> Self {
+            crate::python::add_python_path(path.clone());
+            Self { path }
+        }
+    }
+
+    impl Drop for ExtraPythonPathGuard {
+        fn drop(&mut self) {
+            crate::python::remove_python_path(&self.path);
+        }
+    }
+
     // Helper function to create a temporary Python file
     fn create_temp_py_file(dir: &TempDir, filename: &str, content: &str) -> PathBuf {
         let file_path = dir.path().join(filename);
         let mut file = File::create(&file_path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file_path
+    }
+
+    #[test]
+    fn test_derive_import_root_for_nested_package() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("acme").join("widgets").join("core");
+        std::fs::create_dir_all(&project_path).unwrap();
+
+        let import_root = derive_import_root("acme.widgets.core", project_path.to_str().unwrap());
+
+        assert_eq!(import_root, temp_dir.path());
+    }
+
+    #[test]
+    fn test_build_pythonpath_includes_project_import_root_and_extra_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("acme").join("widgets").join("core");
+        std::fs::create_dir_all(&project_path).unwrap();
+
+        let extra_path_dir = TempDir::new().unwrap();
+        let _extra_path_guard = ExtraPythonPathGuard::register(extra_path_dir.path().to_path_buf());
+
+        let python_path =
+            build_pythonpath("acme.widgets.core", project_path.to_str().unwrap()).unwrap();
+        let python_paths = std::env::split_paths(&python_path).collect::<Vec<_>>();
+        let import_root = temp_dir.path().to_path_buf();
+        let extra_path = extra_path_dir.path().to_path_buf();
+
+        assert!(python_paths.contains(&project_path));
+        assert!(python_paths.contains(&import_root));
+        assert!(python_paths.contains(&extra_path));
+
+        assert_eq!(
+            python_paths
+                .iter()
+                .filter(|existing| *existing == &project_path)
+                .count(),
+            1
+        );
+        assert_eq!(
+            python_paths
+                .iter()
+                .filter(|existing| *existing == &import_root)
+                .count(),
+            1
+        );
+        assert_eq!(
+            python_paths
+                .iter()
+                .filter(|existing| *existing == &extra_path)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -811,6 +881,48 @@ def main():
         runner
             .stop_isolated(&process_uuid)
             .expect("Failed to stop isolated process");
+    }
+
+    #[test]
+    fn test_exec_isolated_with_external_script_root() {
+        let environment_dir = TempDir::new().unwrap();
+        create_temp_py_file(&environment_dir, "main.py", "VALUE = 'local project file'");
+
+        let python_script = r#"
+def main():
+    return "Hello from temp module"
+        "#;
+
+        // The isolated script package is created in a separate temporary root. Without the
+        // harness' extra PYTHONPATH registration this child import fails with:
+        // "No module named 'pymodule...'"
+        let (pickled_data, _python_env) =
+            crate::test_utils::harness::prepare_script_for_isolation(python_script, "main")
+                .expect("Failed to prepare script for isolation");
+
+        let mut runner = Environment::new(
+            "test_package",
+            environment_dir.path().to_str().unwrap(),
+            None,
+        );
+        runner.boot_main().expect("Failed to boot main environment");
+
+        let process_uuid = runner
+            .exec_isolated(&pickled_data, "external_script_root")
+            .expect("Failed to execute script from external temp root");
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let result = runner
+            .communicate_isolated(&process_uuid)
+            .expect("Failed to communicate with isolated process");
+
+        assert_eq!(result, Some("Hello from temp module".to_string()));
+
+        runner
+            .stop_isolated(&process_uuid)
+            .expect("Failed to stop isolated process");
+        runner.stop_main().expect("Failed to stop main process");
     }
 
     #[test]

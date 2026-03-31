@@ -1,3 +1,4 @@
+import importlib
 import time
 
 import pytest
@@ -34,6 +35,20 @@ def test_successful_execution(import_runner: Environment):
 
     # Verify the result
     assert result == "Hello, World!"
+
+
+def test_package_module_execution(import_runner: Environment, sample_package: str):
+    """Test that isolated execution can import a function from the package root."""
+
+    module = importlib.import_module(f"{sample_package}.module")
+
+    process = import_runner.exec(module.sample_function)
+
+    time.sleep(0.1)
+
+    result = import_runner.communicate_isolated(process)
+
+    assert result == "Hello, world!"
 
 
 def test_exception_in_child_process(import_runner: Environment):
