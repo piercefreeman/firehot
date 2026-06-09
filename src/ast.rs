@@ -204,16 +204,16 @@ impl ProjectAstManager {
         let new_hash = self.calculate_file_hash(file_path)?;
 
         // Check if we have already processed this file and if the content has changed
-        if let Some(old_hash) = self.file_hashes.get(file_path) {
-            if old_hash == &new_hash {
-                // File hasn't changed, return cached imports
-                debug!("File {} hasn't changed, using cached imports", file_path);
-                return Ok(self
-                    .file_imports
-                    .get(file_path)
-                    .cloned()
-                    .unwrap_or_default());
-            }
+        if let Some(old_hash) = self.file_hashes.get(file_path)
+            && old_hash == &new_hash
+        {
+            // File hasn't changed, return cached imports
+            debug!("File {} hasn't changed, using cached imports", file_path);
+            return Ok(self
+                .file_imports
+                .get(file_path)
+                .cloned()
+                .unwrap_or_default());
         }
 
         // File is new or has changed, parse it
@@ -352,7 +352,12 @@ fn collect_imports_with_level(
                 } else {
                     // Handle case where module is None (likely for relative imports like "from . import x")
                     debug!("Module is None, handling relative import");
-                    if import_from.level.is_some() && import_from.level.unwrap().to_u32() > 0 {
+                    if let Some(relative_level) = import_from.level {
+                        let rel_level = relative_level.to_u32();
+                        if rel_level == 0 {
+                            continue;
+                        }
+
                         // This is a relative import
                         let imported: Vec<String> = import_from
                             .names
@@ -360,7 +365,6 @@ fn collect_imports_with_level(
                             .map(|alias| alias.name.to_string())
                             .collect();
                         // Use a placeholder module name based on the relative level
-                        let rel_level = import_from.level.unwrap().to_u32();
                         let module_name = ".".repeat(rel_level as usize);
                         debug!("Created relative import with module: {}", module_name);
                         imports.push(ImportInfo {

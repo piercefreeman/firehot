@@ -57,6 +57,16 @@ pub enum ProcessResult {
     //Log(MultiplexedLogLine),
 }
 
+struct MonitorState<'a> {
+    fork_resolvers: &'a Arc<Mutex<HashMap<String, AsyncResolve<ForkResult>>>>,
+    completion_resolvers: &'a Arc<Mutex<HashMap<String, AsyncResolve<ProcessResult>>>>,
+    forked_processes: &'a Arc<Mutex<HashMap<String, i32>>>,
+    forked_names: &'a Arc<Mutex<HashMap<String, String>>>,
+    pending_process_results: &'a Arc<Mutex<HashMap<i32, ProcessResult>>>,
+    buffer_output: bool,
+    output_buffer: &'a Arc<Mutex<Option<OutputBuffer>>>,
+}
+
 /// Runtime layer for executing Python code. This is a single "built" layer that should be immutable. Any client executed code will be in a forked process and any
 pub struct Layer {
     pub child: Child,                    // The forkable process with all imports loaded
@@ -72,13 +82,10 @@ pub struct Layer {
 
     // These are pinged when the process completes execution
     pub completion_resolvers: Arc<Mutex<HashMap<String, AsyncResolve<ProcessResult>>>>, // Map of UUID to completion resolver
-<<<<<<< Updated upstream
-=======
     // Child processes can finish before the parent emits the ForkResponse that maps
     // their PID back to the request UUID. Keep those early results by PID and replay
     // them once the UUID mapping is known.
     pub pending_process_results: Arc<Mutex<HashMap<i32, ProcessResult>>>,
->>>>>>> Stashed changes
 
     pub stdout_thread: Option<JoinHandle<()>>, // Thread handle for stdout monitoring
     pub stderr_thread: Option<JoinHandle<()>>, // Thread handle for stderr monitoring
@@ -152,6 +159,7 @@ impl Layer {
             forked_names: Arc::new(Mutex::new(HashMap::new())),
             fork_resolvers: Arc::new(Mutex::new(HashMap::new())),
             completion_resolvers: Arc::new(Mutex::new(HashMap::new())),
+            pending_process_results: Arc::new(Mutex::new(HashMap::new())),
             stdout_thread: None,
             stderr_thread: None,
             thread_terminate_tx: Arc::new(Mutex::new(None)),
@@ -176,20 +184,20 @@ impl Layer {
 
     // Get the buffered output as a string
     pub fn get_buffered_output(&self) -> Option<String> {
-        if let Ok(buffer_guard) = self.output_buffer.lock() {
-            if let Some(buffer) = &*buffer_guard {
-                return Some(buffer.get_content());
-            }
+        if let Ok(buffer_guard) = self.output_buffer.lock()
+            && let Some(buffer) = &*buffer_guard
+        {
+            return Some(buffer.get_content());
         }
         None
     }
 
     // Clear the buffered output
     pub fn clear_buffered_output(&self) {
-        if let Ok(mut buffer_guard) = self.output_buffer.lock() {
-            if let Some(buffer) = &mut *buffer_guard {
-                buffer.clear();
-            }
+        if let Ok(mut buffer_guard) = self.output_buffer.lock()
+            && let Some(buffer) = &mut *buffer_guard
+        {
+            buffer.clear();
         }
     }
 
@@ -201,10 +209,10 @@ impl Layer {
     ) {
         if buffer_output {
             // Write to buffer if buffer_output is true
-            if let Ok(mut buffer_guard) = output_buffer.lock() {
-                if let Some(buffer) = &mut *buffer_guard {
-                    buffer.add_line(line);
-                }
+            if let Ok(mut buffer_guard) = output_buffer.lock()
+                && let Some(buffer) = &mut *buffer_guard
+            {
+                buffer.add_line(line);
             }
         } else {
             // Print to stdout (default behavior)
@@ -239,6 +247,7 @@ impl Layer {
         let completion_resolvers_stdout = Arc::clone(&self.completion_resolvers);
         let forked_processes_stdout = Arc::clone(&self.forked_processes);
         let forked_names_stdout = Arc::clone(&self.forked_names);
+        let pending_process_results_stdout = Arc::clone(&self.pending_process_results);
         let output_buffer_stdout = Arc::clone(&self.output_buffer);
         let buffer_output_stdout = self.buffer_output;
 
@@ -246,6 +255,7 @@ impl Layer {
         let completion_resolvers_stderr = Arc::clone(&self.completion_resolvers);
         let forked_processes_stderr = Arc::clone(&self.forked_processes);
         let forked_names_stderr = Arc::clone(&self.forked_names);
+        let pending_process_results_stderr = Arc::clone(&self.pending_process_results);
         let output_buffer_stderr = Arc::clone(&self.output_buffer);
         let buffer_output_stderr = self.buffer_output;
 
@@ -259,6 +269,7 @@ impl Layer {
                 &completion_resolvers_stderr,
                 &forked_processes_stderr,
                 &forked_names_stderr,
+                &pending_process_results_stderr,
                 None, // No need to send termination to other threads
                 buffer_output_stderr,
                 &output_buffer_stderr,
@@ -278,6 +289,7 @@ impl Layer {
                 &completion_resolvers_stdout,
                 &forked_processes_stdout,
                 &forked_names_stdout,
+                &pending_process_results_stdout,
                 Some(stderr_terminate_tx), // Ability to terminate stderr thread
                 buffer_output_stdout,
                 &output_buffer_stdout,
@@ -300,11 +312,21 @@ impl Layer {
         completion_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ProcessResult>>>>,
         forked_processes: &Arc<Mutex<HashMap<String, i32>>>,
         forked_names: &Arc<Mutex<HashMap<String, String>>>,
+        pending_process_results: &Arc<Mutex<HashMap<i32, ProcessResult>>>,
         stderr_terminate_tx: Option<mpsc::Sender<()>>,
         buffer_output: bool,
         output_buffer: &Arc<Mutex<Option<OutputBuffer>>>,
     ) {
         info!("Monitor thread for {} started", stream_name);
+        let state = MonitorState {
+            fork_resolvers,
+            completion_resolvers,
+            forked_processes,
+            forked_names,
+            pending_process_results,
+            buffer_output,
+            output_buffer,
+        };
 
         loop {
             // Check if we've been asked to terminate
@@ -320,15 +342,7 @@ impl Layer {
             match reader.next() {
                 Some(Ok(line)) => {
                     trace!("{} monitor thread read line: {}", stream_name, line);
-                    Self::process_output_line(
-                        &line,
-                        fork_resolvers,
-                        completion_resolvers,
-                        forked_processes,
-                        forked_names,
-                        buffer_output,
-                        output_buffer,
-                    );
+                    Self::process_output_line(&line, &state);
                 }
                 Some(Err(e)) => {
                     error!("Error reading from child process {}: {}", stream_name, e);
@@ -357,21 +371,13 @@ impl Layer {
     }
 
     /// Process output line from either stdout or stderr
-    fn process_output_line(
-        line: &str,
-        fork_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ForkResult>>>>,
-        completion_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ProcessResult>>>>,
-        forked_processes: &Arc<Mutex<HashMap<String, i32>>>,
-        forked_names: &Arc<Mutex<HashMap<String, String>>>,
-        buffer_output: bool,
-        output_buffer: &Arc<Mutex<Option<OutputBuffer>>>,
-    ) {
+    fn process_output_line(line: &str, state: &MonitorState<'_>) {
         // All lines streamed from the forked process (even our own messages)
         // should be multiplexed lines
         match parse_multiplexed_line(line) {
             Ok(log_line) => {
                 // Find which process this log belongs to based on PID
-                let forked_definitions = forked_processes.lock().unwrap();
+                let forked_definitions = state.forked_processes.lock().unwrap();
                 let mut process_uuid = None;
 
                 for (uuid, pid) in forked_definitions.iter() {
@@ -384,17 +390,10 @@ impl Layer {
                 // Just print the log, don't store it
                 if let Some(uuid) = process_uuid {
                     // If we're resolved a UUID from the PID, we should also have a name
-                    let forked_names_guard = forked_names.lock().unwrap();
+                    let forked_names_guard = state.forked_names.lock().unwrap();
                     let process_name = forked_names_guard.get(&uuid.clone());
 
-                    match Self::handle_message(
-                        &log_line.content,
-                        Some(&uuid),
-                        fork_resolvers,
-                        completion_resolvers,
-                        forked_processes,
-                        forked_names,
-                    ) {
+                    match Self::handle_message(&log_line.content, Some(&uuid), state) {
                         Ok(_) => {
                             // Successfully handled the message, nothing more to do
                         }
@@ -411,10 +410,22 @@ impl Layer {
                             );
 
                             // Use the buffering mechanism
-                            Self::output_line(buffer_output, output_buffer, output_line);
+                            Self::output_line(
+                                state.buffer_output,
+                                state.output_buffer,
+                                output_line,
+                            );
                         }
                     }
                 } else {
+                    if Self::store_pending_process_result(
+                        log_line.pid as i32,
+                        &log_line.content,
+                        state.pending_process_results,
+                    ) {
+                        return;
+                    }
+
                     // If we can't match it to a specific process, log it with PID
                     let output_line = format!(
                         "Unmatched log: [{}] {}",
@@ -425,20 +436,13 @@ impl Layer {
                     );
 
                     // Use the buffering mechanism
-                    Self::output_line(buffer_output, output_buffer, output_line);
+                    Self::output_line(state.buffer_output, state.output_buffer, output_line);
                 }
             }
             Err(_e) => {
                 // If parsing fails, treat the line as a raw message. We will log the contents
                 // separately if we fail processing
-                if let Err(_e) = Self::handle_message(
-                    line,
-                    None,
-                    fork_resolvers,
-                    completion_resolvers,
-                    forked_processes,
-                    forked_names,
-                ) {
+                if let Err(_e) = Self::handle_message(line, None, state) {
                     // Unable to parse the line as a message, so log it as a raw line
                     error!("{}", line);
                 }
@@ -450,10 +454,7 @@ impl Layer {
     fn handle_message(
         content: &str,
         uuid: Option<&String>,
-        fork_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ForkResult>>>>,
-        completion_resolvers: &Arc<Mutex<HashMap<String, AsyncResolve<ProcessResult>>>>,
-        forked_processes: &Arc<Mutex<HashMap<String, i32>>>,
-        forked_names: &Arc<Mutex<HashMap<String, String>>>,
+        state: &MonitorState<'_>,
     ) -> Result<(), String> {
         if let Ok(message) = serde_json::from_str::<Message>(content) {
             match message {
@@ -462,17 +463,17 @@ impl Layer {
                     debug!("Monitor thread received fork response: {:?}", response);
 
                     // Store the PID in the forked processes map
-                    let mut forked_processes_guard = forked_processes.lock().unwrap();
+                    let mut forked_processes_guard = state.forked_processes.lock().unwrap();
                     forked_processes_guard.insert(response.request_id.clone(), response.child_pid);
                     drop(forked_processes_guard);
 
                     // Store the process name in the forked names map
-                    let mut forked_names_guard = forked_names.lock().unwrap();
+                    let mut forked_names_guard = state.forked_names.lock().unwrap();
                     forked_names_guard.insert(response.request_id.clone(), response.request_name);
                     drop(forked_names_guard);
 
                     // Resolve the fork status
-                    let fork_resolvers_guard = fork_resolvers.lock().unwrap();
+                    let fork_resolvers_guard = state.fork_resolvers.lock().unwrap();
                     if let Some(resolver) = fork_resolvers_guard.get(&response.request_id) {
                         resolver
                             .resolve(ForkResult::Complete(Some(response.child_pid.to_string())));
@@ -480,8 +481,6 @@ impl Layer {
                         error!("No resolver found for UUID: {}", response.request_id);
                     }
                     drop(fork_resolvers_guard);
-<<<<<<< Updated upstream
-=======
 
                     // A very fast child can report completion before this ForkResponse
                     // gives us the PID-to-UUID mapping. Replaying here prevents
@@ -509,7 +508,6 @@ impl Layer {
                         }
                     }
 
->>>>>>> Stashed changes
                     Ok(())
                 }
                 Message::ChildComplete(complete) => {
@@ -520,7 +518,7 @@ impl Layer {
                     let uuid = uuid.expect("UUID should be known");
 
                     // Resolve the completion
-                    let completion_resolvers_guard = completion_resolvers.lock().unwrap();
+                    let completion_resolvers_guard = state.completion_resolvers.lock().unwrap();
                     if let Some(resolver) = completion_resolvers_guard.get(uuid) {
                         resolver.resolve(ProcessResult::Complete(complete.result.clone()));
                     } else {
@@ -537,7 +535,7 @@ impl Layer {
                     let uuid = uuid.expect("UUID should be known");
 
                     // Resolve the completion with an error, include both error message and traceback
-                    let completion_resolvers_guard = completion_resolvers.lock().unwrap();
+                    let completion_resolvers_guard = state.completion_resolvers.lock().unwrap();
                     if let Some(resolver) = completion_resolvers_guard.get(uuid) {
                         // Create a complete error message with both the error text and traceback if available
                         let full_error = if let Some(traceback) = &error.traceback {
@@ -597,6 +595,43 @@ impl Layer {
             Err(format!(
                 "Failed to parse message, received raw content: {content}"
             ))
+        }
+    }
+
+    fn store_pending_process_result(
+        pid: i32,
+        content: &str,
+        pending_process_results: &Arc<Mutex<HashMap<i32, ProcessResult>>>,
+    ) -> bool {
+        match serde_json::from_str::<Message>(content) {
+            Ok(Message::ChildComplete(complete)) => {
+                pending_process_results
+                    .lock()
+                    .unwrap()
+                    .insert(pid, ProcessResult::Complete(complete.result));
+                debug!(
+                    "Stored pending completion result for PID {} until ForkResponse arrives",
+                    pid
+                );
+                true
+            }
+            Ok(Message::ChildError(error)) => {
+                let full_error = if let Some(traceback) = error.traceback {
+                    format!("{}\n\n{}", error.error, traceback)
+                } else {
+                    error.error
+                };
+                pending_process_results
+                    .lock()
+                    .unwrap()
+                    .insert(pid, ProcessResult::Error(full_error));
+                debug!(
+                    "Stored pending error result for PID {} until ForkResponse arrives",
+                    pid
+                );
+                true
+            }
+            _ => false,
         }
     }
 
@@ -712,8 +747,69 @@ impl Layer {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     use crate::environment::Environment;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
+
+    #[test]
+    fn test_replays_child_completion_that_arrives_before_fork_response() {
+        let fork_resolvers = Arc::new(Mutex::new(HashMap::new()));
+        let completion_resolvers = Arc::new(Mutex::new(HashMap::new()));
+        let forked_processes = Arc::new(Mutex::new(HashMap::new()));
+        let forked_names = Arc::new(Mutex::new(HashMap::new()));
+        let pending_process_results = Arc::new(Mutex::new(HashMap::new()));
+        let output_buffer = Arc::new(Mutex::new(Some(OutputBuffer::new())));
+
+        let process_uuid = "process-uuid".to_string();
+        let fork_resolver = AsyncResolve::new();
+        let completion_resolver = AsyncResolve::new();
+
+        fork_resolvers
+            .lock()
+            .unwrap()
+            .insert(process_uuid.clone(), fork_resolver.clone());
+        completion_resolvers
+            .lock()
+            .unwrap()
+            .insert(process_uuid.clone(), completion_resolver.clone());
+        let state = MonitorState {
+            fork_resolvers: &fork_resolvers,
+            completion_resolvers: &completion_resolvers,
+            forked_processes: &forked_processes,
+            forked_names: &forked_names,
+            pending_process_results: &pending_process_results,
+            buffer_output: true,
+            output_buffer: &output_buffer,
+        };
+
+        Layer::process_output_line(
+            r#"[PID:1234:stdout]{"name":"CHILD_COMPLETE","result":"done"}"#,
+            &state,
+        );
+
+        assert!(!completion_resolver.is_resolved());
+        assert!(pending_process_results.lock().unwrap().contains_key(&1234));
+
+        Layer::process_output_line(
+            r#"{"name":"FORK_RESPONSE","request_id":"process-uuid","request_name":"fast","child_pid":1234}"#,
+            &state,
+        );
+
+        match fork_resolver.get() {
+            Some(ForkResult::Complete(Some(pid))) => assert_eq!(pid, "1234"),
+            other => panic!("expected successful fork result, got {other:?}"),
+        }
+
+        match completion_resolver.get() {
+            Some(ProcessResult::Complete(Some(result))) => assert_eq!(result, "done"),
+            other => panic!("expected replayed completion result, got {other:?}"),
+        }
+
+        assert!(!pending_process_results.lock().unwrap().contains_key(&1234));
+    }
 
     #[test]
     fn test_utf8_error_handling() -> Result<(), String> {
