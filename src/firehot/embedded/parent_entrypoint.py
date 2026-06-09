@@ -151,8 +151,23 @@ MESSAGES = {
 }
 
 
+<<<<<<< Updated upstream
 def write_message(message: MessageBase):
     sys.stdout.write(f"{json_dumps(asdict(message))}\n")
+=======
+def write_message(message: MessageBase) -> None:
+    payload = f"{json_dumps(asdict(cast(Any, message)))}\n"
+    stdout_stream = MultiplexedStream._instances.get("stdout")
+
+    if stdout_stream is not None and stdout_stream.active:
+        # Control messages must not wait behind the child stdout redirection pipe.
+        # Fast child exits can tear down the monitor thread before it drains that pipe,
+        # leaving Rust waiting forever for CHILD_COMPLETE/CHILD_ERROR.
+        stdout_stream.write_multiplexed(payload)
+        return
+
+    sys.stdout.write(payload)
+>>>>>>> Stashed changes
     sys.stdout.flush()
 
 

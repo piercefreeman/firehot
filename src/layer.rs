@@ -72,6 +72,13 @@ pub struct Layer {
 
     // These are pinged when the process completes execution
     pub completion_resolvers: Arc<Mutex<HashMap<String, AsyncResolve<ProcessResult>>>>, // Map of UUID to completion resolver
+<<<<<<< Updated upstream
+=======
+    // Child processes can finish before the parent emits the ForkResponse that maps
+    // their PID back to the request UUID. Keep those early results by PID and replay
+    // them once the UUID mapping is known.
+    pub pending_process_results: Arc<Mutex<HashMap<i32, ProcessResult>>>,
+>>>>>>> Stashed changes
 
     pub stdout_thread: Option<JoinHandle<()>>, // Thread handle for stdout monitoring
     pub stderr_thread: Option<JoinHandle<()>>, // Thread handle for stderr monitoring
@@ -473,6 +480,36 @@ impl Layer {
                         error!("No resolver found for UUID: {}", response.request_id);
                     }
                     drop(fork_resolvers_guard);
+<<<<<<< Updated upstream
+=======
+
+                    // A very fast child can report completion before this ForkResponse
+                    // gives us the PID-to-UUID mapping. Replaying here prevents
+                    // communicate_isolated from waiting on a resolver that already
+                    // received its process result under an unmapped PID.
+                    let pending_result = state
+                        .pending_process_results
+                        .lock()
+                        .unwrap()
+                        .remove(&response.child_pid);
+                    if let Some(result) = pending_result {
+                        debug!(
+                            "Resolving pending result for process {} with PID {}",
+                            response.request_id, response.child_pid
+                        );
+                        let completion_resolvers_guard = state.completion_resolvers.lock().unwrap();
+                        if let Some(resolver) = completion_resolvers_guard.get(&response.request_id)
+                        {
+                            resolver.resolve(result);
+                        } else {
+                            error!(
+                                "No completion resolver found for UUID: {}",
+                                response.request_id
+                            );
+                        }
+                    }
+
+>>>>>>> Stashed changes
                     Ok(())
                 }
                 Message::ChildComplete(complete) => {
