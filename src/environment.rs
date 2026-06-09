@@ -19,130 +19,12 @@ use crate::async_resolve::AsyncResolve;
 use crate::layer::{ForkResult, Layer, ProcessResult};
 use crate::messages::{ExitRequest, ForkRequest, Message};
 use crate::python::{extra_python_paths, python_command};
-use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
+use crate::scripts::{
+    PYTHON_CHILD_SCRIPT, PYTHON_IMPORT_SAFETY_PROBE_SCRIPT, PYTHON_LOADER_SCRIPT,
+};
 use serde::Deserialize;
 
 const IMPORT_SAFETY_PROBE_MARKER: &str = "FIREHOT_IMPORT_SAFETY_PROBE=";
-
-const PYTHON_IMPORT_SAFETY_PROBE_SCRIPT: &str = r#"
-import importlib
-import builtins
-import json
-import os
-import sys
-import threading
-import traceback
-
-try:
-    from firehot._core import get_total_thread_count
-except ImportError:
-
-    def get_total_thread_count():
-        return threading.active_count()
-
-MARKER = "FIREHOT_IMPORT_SAFETY_PROBE="
-
-
-def emit(payload, status):
-    sys.stdout.write(MARKER + json.dumps(payload, sort_keys=True) + "\n")
-    sys.stdout.flush()
-    os._exit(status)
-
-
-try:
-    modules = json.loads(sys.argv[1]) if len(sys.argv) > 1 else []
-    if not isinstance(modules, list):
-        raise ValueError("Expected a JSON list of module names")
-except Exception as exc:
-    emit(
-        {
-            "status": "error",
-            "module": None,
-            "error": str(exc),
-            "traceback": traceback.format_exc(),
-        },
-        2,
-    )
-
-unsafe_modules = []
-unsafe_module_set = set()
-
-
-def mark_unsafe(module_name):
-    if module_name not in unsafe_module_set:
-        unsafe_module_set.add(module_name)
-        unsafe_modules.append(module_name)
-
-
-def loaded_requested_module(loaded_modules, requested_module):
-    if requested_module in loaded_modules:
-        return True
-
-    for loaded_module in loaded_modules:
-        if requested_module.startswith(loaded_module + "."):
-            return True
-        if loaded_module.startswith(requested_module + "."):
-            return True
-
-    return False
-
-
-requested_modules = [str(module_name) for module_name in modules]
-for module_name in modules:
-    module_name = str(module_name)
-    if module_name in unsafe_module_set:
-        continue
-
-    try:
-        imported_modules = []
-        original_import = builtins.__import__
-
-        def tracking_import(name, globals=None, locals=None, fromlist=(), level=0):
-            if level == 0 and name:
-                imported_modules.append(str(name))
-                for imported in fromlist or ():
-                    if imported != "*":
-                        imported_modules.append(f"{name}.{imported}")
-            return original_import(name, globals, locals, fromlist, level)
-
-        pre_modules = set(sys.modules)
-        pre_total = get_total_thread_count()
-        builtins.__import__ = tracking_import
-        try:
-            importlib.import_module(module_name)
-        finally:
-            builtins.__import__ = original_import
-        post_total = get_total_thread_count()
-        touched_modules = (set(sys.modules) - pre_modules) | set(imported_modules) | {module_name}
-    except Exception as exc:
-        emit(
-            {
-                "status": "error",
-                "module": module_name,
-                "error": str(exc),
-                "traceback": traceback.format_exc(),
-            },
-            2,
-        )
-
-    if post_total > pre_total:
-        mark_unsafe(module_name)
-        for requested_module in requested_modules:
-            if loaded_requested_module(touched_modules, requested_module):
-                mark_unsafe(requested_module)
-    else:
-        touched_unsafe_module = any(
-            loaded_requested_module(touched_modules, unsafe_module)
-            for unsafe_module in unsafe_module_set
-        )
-        if touched_unsafe_module:
-            mark_unsafe(module_name)
-            for requested_module in requested_modules:
-                if loaded_requested_module(touched_modules, requested_module):
-                    mark_unsafe(requested_module)
-
-emit({"status": "ok", "unsafe_modules": unsafe_modules}, 0)
-"#;
 
 #[derive(Debug, Deserialize)]
 struct ImportSafetyProbeResult {
@@ -876,9 +758,18 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use std::env;
+    use std::ffi::OsString;
     use std::fs::{self, File};
     use std::io::Write;
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard};
+
+    const THREAD_DEP_IMPORT_LOG_ENV: &str = "FIREHOT_THREAD_DEP_IMPORT_LOG";
+    const THREADED_DEPENDENCY_FIXTURE: &str =
+        include_str!("firehot/__tests__/fixtures/threaded_dependency.py");
+
+    static IMPORT_LOG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct ExtraPythonPathGuard {
         path: PathBuf,
@@ -913,30 +804,51 @@ mod tests {
         )
     }
 
-    fn create_threaded_dependency(dir: &TempDir, module_name: &str, import_log: &Path) {
-        let import_log_json =
-            serde_json::to_string(&import_log.to_string_lossy().to_string()).unwrap();
-        let module_code = format!(
-            r#"
-from pathlib import Path
-import threading
-import time
+    struct ImportLogEnvGuard {
+        original: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
 
-LOG_PATH = {import_log_json}
-path = Path(LOG_PATH)
-previous = path.read_text() if path.exists() else ""
-path.write_text(previous + "imported\n")
+    impl ImportLogEnvGuard {
+        fn set(import_log: &Path) -> Self {
+            let lock = IMPORT_LOG_ENV_LOCK.lock().unwrap();
+            let original = env::var_os(THREAD_DEP_IMPORT_LOG_ENV);
 
+            unsafe {
+                env::set_var(THREAD_DEP_IMPORT_LOG_ENV, import_log);
+            }
 
-def keep_alive():
-    time.sleep(30)
+            Self {
+                original,
+                _lock: lock,
+            }
+        }
+    }
 
+    impl Drop for ImportLogEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(original) = &self.original {
+                    env::set_var(THREAD_DEP_IMPORT_LOG_ENV, original);
+                } else {
+                    env::remove_var(THREAD_DEP_IMPORT_LOG_ENV);
+                }
+            }
+        }
+    }
 
-threading.Thread(target=keep_alive, daemon=True).start()
-"#
-        );
+    fn create_threaded_dependency(
+        dir: &TempDir,
+        module_name: &str,
+        import_log: &Path,
+    ) -> ImportLogEnvGuard {
+        fs::write(
+            dir.path().join(format!("{module_name}.py")),
+            THREADED_DEPENDENCY_FIXTURE,
+        )
+        .unwrap();
 
-        fs::write(dir.path().join(format!("{module_name}.py")), module_code).unwrap();
+        ImportLogEnvGuard::set(import_log)
     }
 
     #[test]
@@ -945,7 +857,8 @@ threading.Thread(target=keep_alive, daemon=True).start()
         let import_log = dependency_dir.path().join("import-log.txt");
         let module_name = unique_module_name("unsafe_thread_dep");
         let wrapper_module_name = unique_module_name("unsafe_thread_wrapper_dep");
-        create_threaded_dependency(&dependency_dir, &module_name, &import_log);
+        let _import_log_env =
+            create_threaded_dependency(&dependency_dir, &module_name, &import_log);
         fs::write(
             dependency_dir
                 .path()
@@ -985,7 +898,8 @@ threading.Thread(target=keep_alive, daemon=True).start()
         let dependency_dir = TempDir::new().unwrap();
         let import_log = dependency_dir.path().join("import-log.txt");
         let module_name = unique_module_name("unsafe_thread_dep");
-        create_threaded_dependency(&dependency_dir, &module_name, &import_log);
+        let _import_log_env =
+            create_threaded_dependency(&dependency_dir, &module_name, &import_log);
 
         let _extra_path_guard = ExtraPythonPathGuard::register(dependency_dir.path().to_path_buf());
         create_temp_py_file(
