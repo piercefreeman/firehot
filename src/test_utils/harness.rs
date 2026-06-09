@@ -8,21 +8,29 @@ use log::{debug, info};
 use serde_json::{self, json};
 use std::fs;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use tempfile::TempDir;
 use uuid::Uuid;
 
 use std::env;
+
+pub(crate) static PYTHONPATH_LOCK: Mutex<()> = Mutex::new(());
 
 /// Python env guard that restores the original PYTHONPATH when dropped
 pub struct PythonPathGuard {
     pub module_name: String,
     pub container_path: String,
 
+    _pythonpath_lock: MutexGuard<'static, ()>,
     _temp_dir: TempDir,
 }
 
 impl PythonPathGuard {
     fn new(module_name: String, temp_dir: TempDir) -> Self {
+        let pythonpath_lock = PYTHONPATH_LOCK
+            .lock()
+            .expect("Failed to lock PYTHONPATH test guard");
+
         // Get the path from temp_dir
         let container_path = temp_dir
             .path()
@@ -46,6 +54,7 @@ impl PythonPathGuard {
         Self {
             module_name,
             container_path,
+            _pythonpath_lock: pythonpath_lock,
             _temp_dir: temp_dir,
         }
     }

@@ -17,6 +17,137 @@ use crate::async_resolve::AsyncResolve;
 use crate::layer::{ForkResult, Layer, ProcessResult};
 use crate::messages::{ExitRequest, ForkRequest, Message};
 use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
+use serde::Deserialize;
+
+const IMPORT_SAFETY_PROBE_MARKER: &str = "FIREHOT_IMPORT_SAFETY_PROBE=";
+
+const PYTHON_IMPORT_SAFETY_PROBE_SCRIPT: &str = r#"
+import importlib
+import builtins
+import json
+import os
+import sys
+import threading
+import traceback
+
+from firehot.firehot import get_total_thread_count
+
+MARKER = "FIREHOT_IMPORT_SAFETY_PROBE="
+
+
+def emit(payload, status):
+    sys.stdout.write(MARKER + json.dumps(payload, sort_keys=True) + "\n")
+    sys.stdout.flush()
+    os._exit(status)
+
+
+try:
+    modules = json.loads(sys.argv[1]) if len(sys.argv) > 1 else []
+    if not isinstance(modules, list):
+        raise ValueError("Expected a JSON list of module names")
+except Exception as exc:
+    emit(
+        {
+            "status": "error",
+            "module": None,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        },
+        2,
+    )
+
+unsafe_modules = []
+unsafe_module_set = set()
+
+
+def mark_unsafe(module_name):
+    if module_name not in unsafe_module_set:
+        unsafe_module_set.add(module_name)
+        unsafe_modules.append(module_name)
+
+
+def loaded_requested_module(loaded_modules, requested_module):
+    if requested_module in loaded_modules:
+        return True
+
+    for loaded_module in loaded_modules:
+        if requested_module.startswith(loaded_module + "."):
+            return True
+        if loaded_module.startswith(requested_module + "."):
+            return True
+
+    return False
+
+
+requested_modules = [str(module_name) for module_name in modules]
+for module_name in modules:
+    module_name = str(module_name)
+    if module_name in unsafe_module_set:
+        continue
+
+    try:
+        imported_modules = []
+        original_import = builtins.__import__
+
+        def tracking_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if level == 0 and name:
+                imported_modules.append(str(name))
+                for imported in fromlist or ():
+                    if imported != "*":
+                        imported_modules.append(f"{name}.{imported}")
+            return original_import(name, globals, locals, fromlist, level)
+
+        pre_modules = set(sys.modules)
+        pre_total = get_total_thread_count()
+        builtins.__import__ = tracking_import
+        try:
+            importlib.import_module(module_name)
+        finally:
+            builtins.__import__ = original_import
+        post_total = get_total_thread_count()
+        touched_modules = (set(sys.modules) - pre_modules) | set(imported_modules) | {module_name}
+    except Exception as exc:
+        emit(
+            {
+                "status": "error",
+                "module": module_name,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            },
+            2,
+        )
+
+    if post_total > pre_total:
+        mark_unsafe(module_name)
+        for requested_module in requested_modules:
+            if loaded_requested_module(touched_modules, requested_module):
+                mark_unsafe(requested_module)
+    else:
+        touched_unsafe_module = any(
+            loaded_requested_module(touched_modules, unsafe_module)
+            for unsafe_module in unsafe_module_set
+        )
+        if touched_unsafe_module:
+            mark_unsafe(module_name)
+            for requested_module in requested_modules:
+                if loaded_requested_module(touched_modules, requested_module):
+                    mark_unsafe(requested_module)
+
+emit({"status": "ok", "unsafe_modules": unsafe_modules}, 0)
+"#;
+
+#[derive(Debug, Deserialize)]
+struct ImportSafetyProbeResult {
+    status: String,
+    #[serde(default)]
+    unsafe_modules: Vec<String>,
+    #[serde(default)]
+    module: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    traceback: Option<String>,
+}
 
 /// Runner for isolated Python code execution
 pub struct Environment {
@@ -98,6 +229,11 @@ impl Environment {
             .ast_manager
             .process_all_py_files()
             .map_err(|e| format!("Failed to process Python files: {e}"))?;
+        let auto_ignored_modules = detect_fork_unsafe_modules(&third_party_modules)?;
+        let preload_modules: HashSet<String> = third_party_modules
+            .difference(&auto_ignored_modules)
+            .cloned()
+            .collect();
 
         let start_time = Instant::now();
 
@@ -107,9 +243,9 @@ impl Environment {
 
         info!(
             "Spawning Python subprocess to load {} modules",
-            third_party_modules.len()
+            preload_modules.len()
         );
-        let mut child = spawn_python_loader(&third_party_modules, &module_locations)
+        let mut child = spawn_python_loader(&preload_modules, &module_locations)
             .map_err(|e| format!("Failed to spawn Python loader: {e}"))?;
 
         let stdin = child
@@ -566,6 +702,87 @@ pickled_str = "{pickled_data}"
     }
 }
 
+fn detect_fork_unsafe_modules(modules: &HashSet<String>) -> Result<HashSet<String>, String> {
+    if modules.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let mut module_list = modules.iter().cloned().collect::<Vec<_>>();
+    module_list.sort();
+
+    let probe_result = run_import_safety_probe(&module_list)?;
+    let unsafe_modules = probe_result
+        .unsafe_modules
+        .into_iter()
+        .collect::<HashSet<_>>();
+
+    if !unsafe_modules.is_empty() {
+        eprintln!(
+            "{}",
+            format!("Firehot auto-ignored fork-unsafe imports: {}", {
+                let mut modules = unsafe_modules.iter().cloned().collect::<Vec<_>>();
+                modules.sort();
+                modules.join(", ")
+            })
+            .yellow()
+            .bold()
+        );
+        info!(
+            "Auto-ignored fork-unsafe imports during boot: {:?}",
+            unsafe_modules
+        );
+    }
+
+    Ok(unsafe_modules)
+}
+
+fn run_import_safety_probe(module_names: &[String]) -> Result<ImportSafetyProbeResult, String> {
+    let import_json = serde_json::to_string(module_names)
+        .map_err(|e| format!("Failed to serialize module names for import safety probe: {e}"))?;
+
+    let output = Command::new("python")
+        .args(["-c", PYTHON_IMPORT_SAFETY_PROBE_SCRIPT])
+        .arg(import_json)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("Failed to spawn Python import safety probe: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let Some(payload) = stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix(IMPORT_SAFETY_PROBE_MARKER))
+    else {
+        return Err(format!(
+            "Import safety probe did not produce a result marker.\nstdout:\n{}\nstderr:\n{}",
+            stdout, stderr
+        ));
+    };
+
+    let probe_result: ImportSafetyProbeResult = serde_json::from_str(payload)
+        .map_err(|e| format!("Failed to parse import safety probe result: {e}\n{payload}"))?;
+
+    if probe_result.status != "ok" || !output.status.success() {
+        let module_text = probe_result
+            .module
+            .as_deref()
+            .map(|module| format!(" for module '{module}'"))
+            .unwrap_or_default();
+        let error = probe_result
+            .error
+            .unwrap_or_else(|| "unknown import safety probe error".to_string());
+        let traceback = probe_result.traceback.unwrap_or_default();
+        return Err(format!(
+            "Import safety probe failed{module_text}: {error}\n\n{traceback}"
+        ));
+    }
+
+    Ok(probe_result)
+}
+
 /// Spawn a Python process that imports the given modules and then waits for commands on stdin.
 /// The Python process prints "IMPORTS_LOADED" to stdout once all imports are complete.
 /// After that, it will listen for commands on stdin, which can include fork requests and code to execute.
@@ -604,9 +821,11 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use std::fs::File;
+    use std::env;
+    use std::ffi::OsString;
+    use std::fs::{self, File};
     use std::io::Write;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     // Helper function to create a temporary Python file
     fn create_temp_py_file(dir: &TempDir, filename: &str, content: &str) -> PathBuf {
@@ -614,6 +833,149 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file_path
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+        _pythonpath_lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvVarGuard {
+        fn prepend_path(key: &'static str, path: &Path) -> Self {
+            let pythonpath_lock = crate::test_utils::harness::PYTHONPATH_LOCK
+                .lock()
+                .expect("Failed to lock PYTHONPATH test guard");
+            let original = env::var_os(key);
+            let mut next = OsString::from(path.as_os_str());
+            let path_separator = if cfg!(windows) { ";" } else { ":" };
+
+            if let Some(current) = &original {
+                if !current.is_empty() {
+                    next.push(path_separator);
+                    next.push(current);
+                }
+            }
+
+            env::set_var(key, &next);
+
+            Self {
+                key,
+                original,
+                _pythonpath_lock: pythonpath_lock,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => env::set_var(self.key, value),
+                None => env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn unique_module_name(prefix: &str) -> String {
+        format!(
+            "{}_{}",
+            prefix,
+            Uuid::new_v4().to_string().replace('-', "_")
+        )
+    }
+
+    fn create_threaded_dependency(dir: &TempDir, module_name: &str, import_log: &Path) {
+        let import_log_json =
+            serde_json::to_string(&import_log.to_string_lossy().to_string()).unwrap();
+        let module_code = format!(
+            r#"
+from pathlib import Path
+import threading
+import time
+
+LOG_PATH = {import_log_json}
+path = Path(LOG_PATH)
+previous = path.read_text() if path.exists() else ""
+path.write_text(previous + "imported\n")
+
+
+def keep_alive():
+    time.sleep(30)
+
+
+threading.Thread(target=keep_alive, daemon=True).start()
+"#
+        );
+
+        fs::write(dir.path().join(format!("{module_name}.py")), module_code).unwrap();
+    }
+
+    #[test]
+    fn test_detect_fork_unsafe_modules_detects_threaded_imports() {
+        let dependency_dir = TempDir::new().unwrap();
+        let import_log = dependency_dir.path().join("import-log.txt");
+        let module_name = unique_module_name("unsafe_thread_dep");
+        let wrapper_module_name = unique_module_name("unsafe_thread_wrapper_dep");
+        create_threaded_dependency(&dependency_dir, &module_name, &import_log);
+        fs::write(
+            dependency_dir
+                .path()
+                .join(format!("{wrapper_module_name}.py")),
+            format!("import {module_name}\n"),
+        )
+        .unwrap();
+
+        let _python_path = EnvVarGuard::prepend_path("PYTHONPATH", dependency_dir.path());
+        let modules = HashSet::from([
+            module_name.clone(),
+            wrapper_module_name.clone(),
+            "json".to_string(),
+        ]);
+
+        let unsafe_modules = detect_fork_unsafe_modules(&modules).unwrap();
+
+        assert!(
+            unsafe_modules.contains(&module_name),
+            "expected threaded import to be auto-ignored"
+        );
+        assert!(
+            unsafe_modules.contains(&wrapper_module_name),
+            "expected wrapper import with unsafe transitive side effects to be auto-ignored"
+        );
+        assert!(
+            !unsafe_modules.contains("json"),
+            "expected safe stdlib import to remain preloadable"
+        );
+    }
+
+    #[test]
+    fn test_boot_main_auto_ignores_imports_that_spawn_threads() {
+        let project_dir = TempDir::new().unwrap();
+        let dependency_dir = TempDir::new().unwrap();
+        let import_log = dependency_dir.path().join("import-log.txt");
+        let module_name = unique_module_name("unsafe_thread_dep");
+        create_threaded_dependency(&dependency_dir, &module_name, &import_log);
+
+        let _python_path = EnvVarGuard::prepend_path("PYTHONPATH", dependency_dir.path());
+        create_temp_py_file(
+            &project_dir,
+            "main.py",
+            &format!("import {module_name}\nimport json\n"),
+        );
+
+        let mut runner =
+            Environment::new_for_test("test_package", project_dir.path().to_str().unwrap(), None);
+        runner.boot_main().expect("Failed to boot main environment");
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        runner.stop_main().expect("Failed to stop main environment");
+
+        let import_log_contents = fs::read_to_string(&import_log).unwrap();
+        assert_eq!(
+            import_log_contents.lines().count(),
+            1,
+            "unsafe dependency should only be imported by the disposable probe"
+        );
     }
 
     #[test]
