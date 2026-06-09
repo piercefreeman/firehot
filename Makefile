@@ -4,7 +4,7 @@
 all: lint
 
 # Package directories
-ROOT_DIR := ./firehot/
+ROOT_DIR := ./src/firehot/
 DEMOPACKAGE_DIR := ./demopackage/demopackage/
 EXTERNAL_DIR := ./demopackage/external-package/
 PKG_DIRS := $(ROOT_DIR) $(DEMOPACKAGE_DIR) $(EXTERNAL_DIR)

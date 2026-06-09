@@ -169,20 +169,20 @@ impl Layer {
 
     // Get the buffered output as a string
     pub fn get_buffered_output(&self) -> Option<String> {
-        if let Ok(buffer_guard) = self.output_buffer.lock() {
-            if let Some(buffer) = &*buffer_guard {
-                return Some(buffer.get_content());
-            }
+        if let Ok(buffer_guard) = self.output_buffer.lock()
+            && let Some(buffer) = &*buffer_guard
+        {
+            return Some(buffer.get_content());
         }
         None
     }
 
     // Clear the buffered output
     pub fn clear_buffered_output(&self) {
-        if let Ok(mut buffer_guard) = self.output_buffer.lock() {
-            if let Some(buffer) = &mut *buffer_guard {
-                buffer.clear();
-            }
+        if let Ok(mut buffer_guard) = self.output_buffer.lock()
+            && let Some(buffer) = &mut *buffer_guard
+        {
+            buffer.clear();
         }
     }
 
@@ -194,10 +194,10 @@ impl Layer {
     ) {
         if buffer_output {
             // Write to buffer if buffer_output is true
-            if let Ok(mut buffer_guard) = output_buffer.lock() {
-                if let Some(buffer) = &mut *buffer_guard {
-                    buffer.add_line(line);
-                }
+            if let Ok(mut buffer_guard) = output_buffer.lock()
+                && let Some(buffer) = &mut *buffer_guard
+            {
+                buffer.add_line(line);
             }
         } else {
             // Print to stdout (default behavior)
@@ -596,7 +596,9 @@ impl Layer {
                 info!("Successfully sent termination signal to stdout channel");
             }
         } else {
-            warn!("No stdout termination channel found - monitor thread might not be running or already being shut down");
+            warn!(
+                "No stdout termination channel found - monitor thread might not be running or already being shut down"
+            );
         }
 
         // Wait for stdout thread to complete
@@ -645,7 +647,9 @@ impl Layer {
                 info!("Successfully sent termination signal to stderr channel");
             }
         } else {
-            warn!("No stderr termination channel found - monitor thread might not be running or already being shut down");
+            warn!(
+                "No stderr termination channel found - monitor thread might not be running or already being shut down"
+            );
         }
 
         // Wait for stderr thread to complete
@@ -678,7 +682,7 @@ mod tests {
     fn test_utf8_error_handling() -> Result<(), String> {
         use crate::layer::Utf8LossyLines;
         use std::io::BufRead;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         // Instead of using the complex environment setup, let's create a simple test
         // that reproduces the UTF-8 issue by creating a child process that outputs invalid UTF-8
@@ -701,7 +705,7 @@ sys.exit(0)
 "#;
 
         // Create a child process that runs our Python code
-        let mut child = Command::new("python")
+        let mut child = crate::python::python_command()
             .arg("-c")
             .arg(python_code)
             .stdout(Stdio::piped())
@@ -758,7 +762,7 @@ sys.exit(0)
         // Now test with our new child process using Utf8LossyLines
         println!("\n=== Testing with Utf8LossyLines iterator (should work) ===");
 
-        let mut child2 = Command::new("python")
+        let mut child2 = crate::python::python_command()
             .arg("-c")
             .arg(python_code)
             .stdout(Stdio::piped())

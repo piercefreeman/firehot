@@ -1,8 +1,9 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use log::{debug, info, trace};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Write as _,
     fs,
 };
 use walkdir::WalkDir;
@@ -10,7 +11,7 @@ use walkdir::WalkDir;
 use rustpython_parser::ast::{
     Mod, Stmt, StmtAsyncFunctionDef, StmtClassDef, StmtFunctionDef, StmtIf, StmtWhile,
 };
-use rustpython_parser::{parse, Mode};
+use rustpython_parser::{Mode, parse};
 
 use sha2::{Digest, Sha256};
 
@@ -203,16 +204,16 @@ impl ProjectAstManager {
         let new_hash = self.calculate_file_hash(file_path)?;
 
         // Check if we have already processed this file and if the content has changed
-        if let Some(old_hash) = self.file_hashes.get(file_path) {
-            if old_hash == &new_hash {
-                // File hasn't changed, return cached imports
-                debug!("File {} hasn't changed, using cached imports", file_path);
-                return Ok(self
-                    .file_imports
-                    .get(file_path)
-                    .cloned()
-                    .unwrap_or_default());
-            }
+        if let Some(old_hash) = self.file_hashes.get(file_path)
+            && old_hash == &new_hash
+        {
+            // File hasn't changed, return cached imports
+            debug!("File {} hasn't changed, using cached imports", file_path);
+            return Ok(self
+                .file_imports
+                .get(file_path)
+                .cloned()
+                .unwrap_or_default());
         }
 
         // File is new or has changed, parse it
@@ -237,7 +238,7 @@ impl ProjectAstManager {
                 return Err(anyhow!(
                     "Unexpected AST format for module in file {}",
                     file_path
-                ))
+                ));
             }
         };
 
@@ -259,7 +260,10 @@ impl ProjectAstManager {
         let mut hasher = Sha256::new();
         hasher.update(&content);
         let hash = hasher.finalize();
-        let hash_str = format!("{hash:x}");
+        let mut hash_str = String::with_capacity(hash.len() * 2);
+        for byte in hash {
+            write!(&mut hash_str, "{byte:02x}")?;
+        }
         trace!("Calculated hash for {}: {}", file_path, hash_str);
         Ok(hash_str)
     }

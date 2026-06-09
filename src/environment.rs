@@ -1,11 +1,13 @@
 use anstream::eprintln;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use log::{debug, error, info, warn};
 use owo_colors::OwoColorize;
 use serde_json::{self};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::{BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::path::PathBuf;
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -16,6 +18,7 @@ use crate::ast::ProjectAstManager;
 use crate::async_resolve::AsyncResolve;
 use crate::layer::{ForkResult, Layer, ProcessResult};
 use crate::messages::{ExitRequest, ForkRequest, Message};
+use crate::python::{extra_python_paths, python_command};
 use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
 use serde::Deserialize;
 
@@ -30,7 +33,12 @@ import sys
 import threading
 import traceback
 
-from firehot.firehot import get_total_thread_count
+try:
+    from firehot._core import get_total_thread_count
+except ImportError:
+
+    def get_total_thread_count():
+        return threading.active_count()
 
 MARKER = "FIREHOT_IMPORT_SAFETY_PROBE="
 
@@ -199,20 +207,20 @@ impl Environment {
 
     /// Get the buffered output from the layer (if in test mode)
     pub fn get_layer_output(&self) -> Option<String> {
-        if let Some(layer_arc) = &self.layer {
-            if let Ok(layer_guard) = layer_arc.lock() {
-                return layer_guard.get_buffered_output();
-            }
+        if let Some(layer_arc) = &self.layer
+            && let Ok(layer_guard) = layer_arc.lock()
+        {
+            return layer_guard.get_buffered_output();
         }
         None
     }
 
     /// Clear the buffered output from the layer (if in test mode)
     pub fn clear_layer_output(&self) {
-        if let Some(layer_arc) = &self.layer {
-            if let Ok(layer_guard) = layer_arc.lock() {
-                layer_guard.clear_buffered_output();
-            }
+        if let Some(layer_arc) = &self.layer
+            && let Ok(layer_guard) = layer_arc.lock()
+        {
+            layer_guard.clear_buffered_output();
         }
     }
 
@@ -229,7 +237,12 @@ impl Environment {
             .ast_manager
             .process_all_py_files()
             .map_err(|e| format!("Failed to process Python files: {e}"))?;
-        let auto_ignored_modules = detect_fork_unsafe_modules(&third_party_modules)?;
+        let python_path = build_pythonpath(
+            self.ast_manager.get_package_name(),
+            self.ast_manager.get_project_path(),
+        )
+        .map_err(|e| format!("Failed to build PYTHONPATH: {e}"))?;
+        let auto_ignored_modules = detect_fork_unsafe_modules(&third_party_modules, &python_path)?;
         let preload_modules: HashSet<String> = third_party_modules
             .difference(&auto_ignored_modules)
             .cloned()
@@ -245,7 +258,7 @@ impl Environment {
             "Spawning Python subprocess to load {} modules",
             preload_modules.len()
         );
-        let mut child = spawn_python_loader(&preload_modules, &module_locations)
+        let mut child = spawn_python_loader(&preload_modules, &module_locations, &python_path)
             .map_err(|e| format!("Failed to spawn Python loader: {e}"))?;
 
         let stdin = child
@@ -675,7 +688,7 @@ pickled_str = "{pickled_data}"
             None => {
                 return Err(format!(
                     "No completion resolver found for UUID: {process_uuid}"
-                ))
+                ));
             }
         };
         drop(completion_resolvers);
@@ -702,7 +715,10 @@ pickled_str = "{pickled_data}"
     }
 }
 
-fn detect_fork_unsafe_modules(modules: &HashSet<String>) -> Result<HashSet<String>, String> {
+fn detect_fork_unsafe_modules(
+    modules: &HashSet<String>,
+    python_path: &OsString,
+) -> Result<HashSet<String>, String> {
     if modules.is_empty() {
         return Ok(HashSet::new());
     }
@@ -710,7 +726,7 @@ fn detect_fork_unsafe_modules(modules: &HashSet<String>) -> Result<HashSet<Strin
     let mut module_list = modules.iter().cloned().collect::<Vec<_>>();
     module_list.sort();
 
-    let probe_result = run_import_safety_probe(&module_list)?;
+    let probe_result = run_import_safety_probe(&module_list, python_path)?;
     let unsafe_modules = probe_result
         .unsafe_modules
         .into_iter()
@@ -736,11 +752,15 @@ fn detect_fork_unsafe_modules(modules: &HashSet<String>) -> Result<HashSet<Strin
     Ok(unsafe_modules)
 }
 
-fn run_import_safety_probe(module_names: &[String]) -> Result<ImportSafetyProbeResult, String> {
+fn run_import_safety_probe(
+    module_names: &[String],
+    python_path: &OsString,
+) -> Result<ImportSafetyProbeResult, String> {
     let import_json = serde_json::to_string(module_names)
         .map_err(|e| format!("Failed to serialize module names for import safety probe: {e}"))?;
 
-    let output = Command::new("python")
+    let output = python_command()
+        .env("PYTHONPATH", python_path)
         .args(["-c", PYTHON_IMPORT_SAFETY_PROBE_SCRIPT])
         .arg(import_json)
         .stdout(Stdio::piped())
@@ -789,6 +809,7 @@ fn run_import_safety_probe(module_names: &[String]) -> Result<ImportSafetyProbeR
 fn spawn_python_loader(
     modules: &HashSet<String>,
     module_locations: &HashMap<String, Vec<crate::ast::SourceLocation>>,
+    python_path: &OsString,
 ) -> Result<Child> {
     // Convert modules to a JSON list of module names
     let import_json = serde_json::to_string(&Vec::from_iter(modules.iter().cloned()))
@@ -802,7 +823,8 @@ fn spawn_python_loader(
     debug!("Module locations JSON: {}", locations_json);
 
     // Spawn Python process with all modules pre-imported
-    let child = Command::new("python")
+    let child = python_command()
+        .env("PYTHONPATH", python_path)
         .args(["-c", PYTHON_LOADER_SCRIPT])
         .arg(import_json)
         .arg(locations_json)
@@ -815,17 +837,65 @@ fn spawn_python_loader(
     Ok(child)
 }
 
+fn build_pythonpath(project_name: &str, project_path: &str) -> Result<OsString> {
+    let mut paths = std::env::var_os("PYTHONPATH")
+        .into_iter()
+        .flat_map(|python_path| std::env::split_paths(&python_path).collect::<Vec<_>>())
+        .collect::<Vec<PathBuf>>();
+
+    push_pythonpath_entry(&mut paths, PathBuf::from(project_path));
+    push_pythonpath_entry(&mut paths, derive_import_root(project_name, project_path));
+    for extra_path in extra_python_paths() {
+        push_pythonpath_entry(&mut paths, extra_path);
+    }
+
+    std::env::join_paths(paths).map_err(|e| anyhow!("Failed to join PYTHONPATH: {}", e))
+}
+
+fn push_pythonpath_entry(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !path.as_os_str().is_empty() && !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+fn derive_import_root(project_name: &str, project_path: &str) -> PathBuf {
+    let mut import_root = PathBuf::from(project_path);
+    for _ in project_name.split('.') {
+        if let Some(parent) = import_root.parent() {
+            import_root = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+    import_root
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use tempfile::TempDir;
 
-    use std::env;
-    use std::ffi::OsString;
     use std::fs::{self, File};
     use std::io::Write;
     use std::path::{Path, PathBuf};
+
+    struct ExtraPythonPathGuard {
+        path: PathBuf,
+    }
+
+    impl ExtraPythonPathGuard {
+        fn register(path: PathBuf) -> Self {
+            crate::python::add_python_path(path.clone());
+            Self { path }
+        }
+    }
+
+    impl Drop for ExtraPythonPathGuard {
+        fn drop(&mut self) {
+            crate::python::remove_python_path(&self.path);
+        }
+    }
 
     // Helper function to create a temporary Python file
     fn create_temp_py_file(dir: &TempDir, filename: &str, content: &str) -> PathBuf {
@@ -833,47 +903,6 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file_path
-    }
-
-    struct EnvVarGuard {
-        key: &'static str,
-        original: Option<OsString>,
-        _pythonpath_lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl EnvVarGuard {
-        fn prepend_path(key: &'static str, path: &Path) -> Self {
-            let pythonpath_lock = crate::test_utils::harness::PYTHONPATH_LOCK
-                .lock()
-                .expect("Failed to lock PYTHONPATH test guard");
-            let original = env::var_os(key);
-            let mut next = OsString::from(path.as_os_str());
-            let path_separator = if cfg!(windows) { ";" } else { ":" };
-
-            if let Some(current) = &original {
-                if !current.is_empty() {
-                    next.push(path_separator);
-                    next.push(current);
-                }
-            }
-
-            env::set_var(key, &next);
-
-            Self {
-                key,
-                original,
-                _pythonpath_lock: pythonpath_lock,
-            }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match &self.original {
-                Some(value) => env::set_var(self.key, value),
-                None => env::remove_var(self.key),
-            }
-        }
     }
 
     fn unique_module_name(prefix: &str) -> String {
@@ -925,14 +954,16 @@ threading.Thread(target=keep_alive, daemon=True).start()
         )
         .unwrap();
 
-        let _python_path = EnvVarGuard::prepend_path("PYTHONPATH", dependency_dir.path());
+        let _extra_path_guard = ExtraPythonPathGuard::register(dependency_dir.path().to_path_buf());
         let modules = HashSet::from([
             module_name.clone(),
             wrapper_module_name.clone(),
             "json".to_string(),
         ]);
+        let python_path =
+            build_pythonpath("test_package", dependency_dir.path().to_str().unwrap()).unwrap();
 
-        let unsafe_modules = detect_fork_unsafe_modules(&modules).unwrap();
+        let unsafe_modules = detect_fork_unsafe_modules(&modules, &python_path).unwrap();
 
         assert!(
             unsafe_modules.contains(&module_name),
@@ -956,7 +987,7 @@ threading.Thread(target=keep_alive, daemon=True).start()
         let module_name = unique_module_name("unsafe_thread_dep");
         create_threaded_dependency(&dependency_dir, &module_name, &import_log);
 
-        let _python_path = EnvVarGuard::prepend_path("PYTHONPATH", dependency_dir.path());
+        let _extra_path_guard = ExtraPythonPathGuard::register(dependency_dir.path().to_path_buf());
         create_temp_py_file(
             &project_dir,
             "main.py",
@@ -975,6 +1006,59 @@ threading.Thread(target=keep_alive, daemon=True).start()
             import_log_contents.lines().count(),
             1,
             "unsafe dependency should only be imported by the disposable probe"
+        );
+    }
+
+    #[test]
+    fn test_derive_import_root_for_nested_package() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("acme").join("widgets").join("core");
+        std::fs::create_dir_all(&project_path).unwrap();
+
+        let import_root = derive_import_root("acme.widgets.core", project_path.to_str().unwrap());
+
+        assert_eq!(import_root, temp_dir.path());
+    }
+
+    #[test]
+    fn test_build_pythonpath_includes_project_import_root_and_extra_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("acme").join("widgets").join("core");
+        std::fs::create_dir_all(&project_path).unwrap();
+
+        let extra_path_dir = TempDir::new().unwrap();
+        let _extra_path_guard = ExtraPythonPathGuard::register(extra_path_dir.path().to_path_buf());
+
+        let python_path =
+            build_pythonpath("acme.widgets.core", project_path.to_str().unwrap()).unwrap();
+        let python_paths = std::env::split_paths(&python_path).collect::<Vec<_>>();
+        let import_root = temp_dir.path().to_path_buf();
+        let extra_path = extra_path_dir.path().to_path_buf();
+
+        assert!(python_paths.contains(&project_path));
+        assert!(python_paths.contains(&import_root));
+        assert!(python_paths.contains(&extra_path));
+
+        assert_eq!(
+            python_paths
+                .iter()
+                .filter(|existing| *existing == &project_path)
+                .count(),
+            1
+        );
+        assert_eq!(
+            python_paths
+                .iter()
+                .filter(|existing| *existing == &import_root)
+                .count(),
+            1
+        );
+        assert_eq!(
+            python_paths
+                .iter()
+                .filter(|existing| *existing == &extra_path)
+                .count(),
+            1
         );
     }
 
@@ -1130,6 +1214,48 @@ def main():
         runner
             .stop_isolated(&process_uuid)
             .expect("Failed to stop isolated process");
+    }
+
+    #[test]
+    fn test_exec_isolated_with_external_script_root() {
+        let environment_dir = TempDir::new().unwrap();
+        create_temp_py_file(&environment_dir, "main.py", "VALUE = 'local project file'");
+
+        let python_script = r#"
+def main():
+    return "Hello from temp module"
+        "#;
+
+        // The isolated script package is created in a separate temporary root. Without the
+        // harness' extra PYTHONPATH registration this child import fails with:
+        // "No module named 'pymodule...'"
+        let (pickled_data, _python_env) =
+            crate::test_utils::harness::prepare_script_for_isolation(python_script, "main")
+                .expect("Failed to prepare script for isolation");
+
+        let mut runner = Environment::new(
+            "test_package",
+            environment_dir.path().to_str().unwrap(),
+            None,
+        );
+        runner.boot_main().expect("Failed to boot main environment");
+
+        let process_uuid = runner
+            .exec_isolated(&pickled_data, "external_script_root")
+            .expect("Failed to execute script from external temp root");
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let result = runner
+            .communicate_isolated(&process_uuid)
+            .expect("Failed to communicate with isolated process");
+
+        assert_eq!(result, Some("Hello from temp module".to_string()));
+
+        runner
+            .stop_isolated(&process_uuid)
+            .expect("Failed to stop isolated process");
+        runner.stop_main().expect("Failed to stop main process");
     }
 
     #[test]
