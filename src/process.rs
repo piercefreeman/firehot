@@ -68,10 +68,10 @@ pub fn get_total_thread_count() -> Result<u32, io::Error> {
         for line in status.lines() {
             if line.starts_with("Threads:") {
                 // Parse the number after "Threads:"
-                if let Some(count_str) = line.split_whitespace().nth(1) {
-                    if let Ok(count) = count_str.parse::<u32>() {
-                        return Ok(count);
-                    }
+                if let Some(count_str) = line.split_whitespace().nth(1)
+                    && let Ok(count) = count_str.parse::<u32>()
+                {
+                    return Ok(count);
                 }
                 break;
             }
@@ -104,8 +104,9 @@ mod tests {
         let initial_count = get_total_thread_count().unwrap();
         assert!(initial_count >= 1);
 
-        // Spawn some threads
-        let handles: Vec<_> = (0..3)
+        // Spawn enough threads that unrelated test harness threads ending concurrently
+        // cannot mask our own thread-count increase.
+        let handles: Vec<_> = (0..8)
             .map(|_| {
                 thread::spawn(|| {
                     // Sleep to ensure we can count it

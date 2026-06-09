@@ -17,6 +17,7 @@ import sys
 import threading
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from enum import Enum
 from json import dumps as json_dumps
 from json import loads as json_loads
 from json.decoder import JSONDecodeError
@@ -24,6 +25,7 @@ from os import getenv
 from sys import _current_frames
 from time import sleep
 from traceback import format_exc, format_stack
+from typing import Any, cast
 
 try:
     from firehot._core import get_total_thread_count
@@ -35,15 +37,11 @@ except ImportError:
         return threading.active_count()
 
 
-try:
-    from enum import StrEnum
-except ImportError:
-    from enum import Enum
+class StrEnum(str, Enum):
+    """Polyfill for StrEnum from Python 3.11."""
 
-    class StrEnum(str, Enum):
-        """Polyfill for StrEnum from Python 3.11."""
+    pass
 
-        pass
 
 #
 # Messages
@@ -151,8 +149,15 @@ MESSAGES = {
 }
 
 
-def write_message(message: MessageBase):
-    sys.stdout.write(f"{json_dumps(asdict(message))}\n")
+def write_message(message: MessageBase) -> None:
+    payload = f"{json_dumps(asdict(cast(Any, message)))}\n"
+    stdout_stream = MultiplexedStream._instances.get("stdout")
+
+    if stdout_stream is not None and stdout_stream.active:
+        stdout_stream.write_multiplexed(payload)
+        return
+
+    sys.stdout.write(payload)
     sys.stdout.flush()
 
 
@@ -188,6 +193,17 @@ DEFAULT_DESCRIPTORS = {
     "stdout": 1,
     "stderr": 2,
 }
+
+
+def format_multiplexed_data(pid: int, stream_name: str, data: bytes) -> bytes:
+    formatted_data = b""
+    prefix = f"[PID:{pid}:{stream_name}]".encode()
+
+    for line in data.splitlines(True):  # Keep line endings
+        if line.strip():  # Skip empty lines
+            formatted_data += prefix + line
+
+    return formatted_data
 
 
 class MultiplexedStream:
@@ -244,35 +260,46 @@ class MultiplexedStream:
         """Monitor the pipe and format output with PID prefix."""
         try:
             while self.active:
+                read_fd = self.read_fd
+                original_fd_dup = self.original_fd_dup
+                if read_fd is None or original_fd_dup is None:
+                    break
+
                 # Wait for data with a timeout
-                ready, _, _ = select.select([self.read_fd], [], [], 0.1)
+                ready, _, _ = select.select([read_fd], [], [], 0.1)
                 if not ready:
                     continue
 
                 try:
-                    data = os.read(self.read_fd, 4096)
+                    data = os.read(read_fd, 4096)
                     if not data:  # EOF
                         break
 
-                    # Format the data with PID and stream name
-                    formatted_data = b""
-                    for line in data.splitlines(True):  # Keep line endings
-                        if line.strip():  # Skip empty lines
-                            prefix = f"[PID:{self.pid}:{self.stream_name}]".encode()
-                            formatted_data += prefix + line
-
                     # Write the formatted data to the original descriptor
-                    os.write(self.original_fd_dup, formatted_data)
+                    os.write(
+                        original_fd_dup,
+                        format_multiplexed_data(self.pid, self.stream_name, data),
+                    )
                 except (IOError, OSError) as e:
                     if e.errno != errno.EAGAIN:  # Not just a would-block error
                         # Write error to original stdout for debugging
                         error_msg = f"[ERROR] MultiplexedStream exception: {str(e)}\n".encode()
-                        os.write(self.original_fd_dup, error_msg)
+                        os.write(original_fd_dup, error_msg)
         finally:
             # Only close the read_fd here; write_fd will be closed in stop_redirection
             if self.read_fd is not None:
                 os.close(self.read_fd)
                 self.read_fd = None
+
+    def write_multiplexed(self, payload: str) -> None:
+        original_fd_dup = self.original_fd_dup
+        if original_fd_dup is None:
+            raise RuntimeError("Cannot write multiplexed output before redirection starts")
+
+        os.write(
+            original_fd_dup,
+            format_multiplexed_data(self.pid, self.stream_name, payload.encode()),
+        )
 
     def stop_redirection(self) -> None:
         """Stop redirection and restore original file descriptors."""

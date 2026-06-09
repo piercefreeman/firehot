@@ -33,12 +33,12 @@ fn resolve_python_executable() -> OsString {
     }
 
     for candidate in ["python", "python3"] {
-        if Command::new(candidate)
+        if let Ok(status) = Command::new(candidate)
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .is_ok()
+            && status.success()
         {
             return candidate.into();
         }

@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  UV_VENV_CLEAR: "1"
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -41,9 +44,6 @@ jobs:
       with:
         path: |
           ~/.cache/uv
-          .venv
-          */*/venv
-          */.venv
         key: ${{ runner.os }}-uv-deps-${{ matrix.package }}-${{ hashFiles('**/pyproject.toml') }}
     
     - name: Set up Rust
@@ -55,7 +55,7 @@ jobs:
       
     - name: Create virtual environment
       run: |
-        uv venv
+        uv venv --clear
         echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV
         echo "$PWD/.venv/bin" >> $GITHUB_PATH
     
@@ -104,7 +104,7 @@ jobs:
     
     - name: Create virtual environment
       run: |
-        uv venv
+        uv venv --clear
         echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV
         echo "$PWD/.venv/bin" >> $GITHUB_PATH
         

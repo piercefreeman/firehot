@@ -19,7 +19,25 @@ use crate::async_resolve::AsyncResolve;
 use crate::layer::{ForkResult, Layer, ProcessResult};
 use crate::messages::{ExitRequest, ForkRequest, Message};
 use crate::python::{extra_python_paths, python_command};
-use crate::scripts::{PYTHON_CHILD_SCRIPT, PYTHON_LOADER_SCRIPT};
+use crate::scripts::{
+    PYTHON_CHILD_SCRIPT, PYTHON_IMPORT_SAFETY_PROBE_SCRIPT, PYTHON_LOADER_SCRIPT,
+};
+use serde::Deserialize;
+
+const IMPORT_SAFETY_PROBE_MARKER: &str = "FIREHOT_IMPORT_SAFETY_PROBE=";
+
+#[derive(Debug, Deserialize)]
+struct ImportSafetyProbeResult {
+    status: String,
+    #[serde(default)]
+    unsafe_modules: Vec<String>,
+    #[serde(default)]
+    module: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    traceback: Option<String>,
+}
 
 /// Runner for isolated Python code execution
 pub struct Environment {
@@ -71,20 +89,20 @@ impl Environment {
 
     /// Get the buffered output from the layer (if in test mode)
     pub fn get_layer_output(&self) -> Option<String> {
-        if let Some(layer_arc) = &self.layer {
-            if let Ok(layer_guard) = layer_arc.lock() {
-                return layer_guard.get_buffered_output();
-            }
+        if let Some(layer_arc) = &self.layer
+            && let Ok(layer_guard) = layer_arc.lock()
+        {
+            return layer_guard.get_buffered_output();
         }
         None
     }
 
     /// Clear the buffered output from the layer (if in test mode)
     pub fn clear_layer_output(&self) {
-        if let Some(layer_arc) = &self.layer {
-            if let Ok(layer_guard) = layer_arc.lock() {
-                layer_guard.clear_buffered_output();
-            }
+        if let Some(layer_arc) = &self.layer
+            && let Ok(layer_guard) = layer_arc.lock()
+        {
+            layer_guard.clear_buffered_output();
         }
     }
 
@@ -101,23 +119,28 @@ impl Environment {
             .ast_manager
             .process_all_py_files()
             .map_err(|e| format!("Failed to process Python files: {e}"))?;
+        let python_path = build_pythonpath(
+            self.ast_manager.get_package_name(),
+            self.ast_manager.get_project_path(),
+        )
+        .map_err(|e| format!("Failed to build PYTHONPATH: {e}"))?;
+        let auto_ignored_modules = detect_fork_unsafe_modules(&third_party_modules, &python_path)?;
+        let preload_modules: HashSet<String> = third_party_modules
+            .difference(&auto_ignored_modules)
+            .cloned()
+            .collect();
 
         let start_time = Instant::now();
 
         // Spawn Python subprocess to load modules
         // Get module locations for error reporting
         let module_locations = self.ast_manager.get_module_locations();
-        let python_path = build_pythonpath(
-            self.ast_manager.get_package_name(),
-            self.ast_manager.get_project_path(),
-        )
-        .map_err(|e| format!("Failed to build PYTHONPATH: {e}"))?;
 
         info!(
             "Spawning Python subprocess to load {} modules",
-            third_party_modules.len()
+            preload_modules.len()
         );
-        let mut child = spawn_python_loader(&third_party_modules, &module_locations, &python_path)
+        let mut child = spawn_python_loader(&preload_modules, &module_locations, &python_path)
             .map_err(|e| format!("Failed to spawn Python loader: {e}"))?;
 
         let stdin = child
@@ -574,6 +597,94 @@ pickled_str = "{pickled_data}"
     }
 }
 
+fn detect_fork_unsafe_modules(
+    modules: &HashSet<String>,
+    python_path: &OsString,
+) -> Result<HashSet<String>, String> {
+    if modules.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let mut module_list = modules.iter().cloned().collect::<Vec<_>>();
+    module_list.sort();
+
+    let probe_result = run_import_safety_probe(&module_list, python_path)?;
+    let unsafe_modules = probe_result
+        .unsafe_modules
+        .into_iter()
+        .collect::<HashSet<_>>();
+
+    if !unsafe_modules.is_empty() {
+        eprintln!(
+            "{}",
+            format!("Firehot auto-ignored fork-unsafe imports: {}", {
+                let mut modules = unsafe_modules.iter().cloned().collect::<Vec<_>>();
+                modules.sort();
+                modules.join(", ")
+            })
+            .yellow()
+            .bold()
+        );
+        info!(
+            "Auto-ignored fork-unsafe imports during boot: {:?}",
+            unsafe_modules
+        );
+    }
+
+    Ok(unsafe_modules)
+}
+
+fn run_import_safety_probe(
+    module_names: &[String],
+    python_path: &OsString,
+) -> Result<ImportSafetyProbeResult, String> {
+    let import_json = serde_json::to_string(module_names)
+        .map_err(|e| format!("Failed to serialize module names for import safety probe: {e}"))?;
+
+    let output = python_command()
+        .env("PYTHONPATH", python_path)
+        .args(["-c", PYTHON_IMPORT_SAFETY_PROBE_SCRIPT])
+        .arg(import_json)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("Failed to spawn Python import safety probe: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let Some(payload) = stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix(IMPORT_SAFETY_PROBE_MARKER))
+    else {
+        return Err(format!(
+            "Import safety probe did not produce a result marker.\nstdout:\n{}\nstderr:\n{}",
+            stdout, stderr
+        ));
+    };
+
+    let probe_result: ImportSafetyProbeResult = serde_json::from_str(payload)
+        .map_err(|e| format!("Failed to parse import safety probe result: {e}\n{payload}"))?;
+
+    if probe_result.status != "ok" || !output.status.success() {
+        let module_text = probe_result
+            .module
+            .as_deref()
+            .map(|module| format!(" for module '{module}'"))
+            .unwrap_or_default();
+        let error = probe_result
+            .error
+            .unwrap_or_else(|| "unknown import safety probe error".to_string());
+        let traceback = probe_result.traceback.unwrap_or_default();
+        return Err(format!(
+            "Import safety probe failed{module_text}: {error}\n\n{traceback}"
+        ));
+    }
+
+    Ok(probe_result)
+}
+
 /// Spawn a Python process that imports the given modules and then waits for commands on stdin.
 /// The Python process prints "IMPORTS_LOADED" to stdout once all imports are complete.
 /// After that, it will listen for commands on stdin, which can include fork requests and code to execute.
@@ -647,9 +758,18 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use std::fs::File;
+    use std::env;
+    use std::ffi::OsString;
+    use std::fs::{self, File};
     use std::io::Write;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard};
+
+    const THREAD_DEP_IMPORT_LOG_ENV: &str = "FIREHOT_THREAD_DEP_IMPORT_LOG";
+    const THREADED_DEPENDENCY_FIXTURE: &str =
+        include_str!("firehot/__tests__/fixtures/threaded_dependency.py");
+
+    static IMPORT_LOG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct ExtraPythonPathGuard {
         path: PathBuf,
@@ -674,6 +794,133 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file_path
+    }
+
+    fn unique_module_name(prefix: &str) -> String {
+        format!(
+            "{}_{}",
+            prefix,
+            Uuid::new_v4().to_string().replace('-', "_")
+        )
+    }
+
+    struct ImportLogEnvGuard {
+        original: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl ImportLogEnvGuard {
+        fn set(import_log: &Path) -> Self {
+            let lock = IMPORT_LOG_ENV_LOCK.lock().unwrap();
+            let original = env::var_os(THREAD_DEP_IMPORT_LOG_ENV);
+
+            unsafe {
+                env::set_var(THREAD_DEP_IMPORT_LOG_ENV, import_log);
+            }
+
+            Self {
+                original,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for ImportLogEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(original) = &self.original {
+                    env::set_var(THREAD_DEP_IMPORT_LOG_ENV, original);
+                } else {
+                    env::remove_var(THREAD_DEP_IMPORT_LOG_ENV);
+                }
+            }
+        }
+    }
+
+    fn create_threaded_dependency(
+        dir: &TempDir,
+        module_name: &str,
+        import_log: &Path,
+    ) -> ImportLogEnvGuard {
+        fs::write(
+            dir.path().join(format!("{module_name}.py")),
+            THREADED_DEPENDENCY_FIXTURE,
+        )
+        .unwrap();
+
+        ImportLogEnvGuard::set(import_log)
+    }
+
+    #[test]
+    fn test_detect_fork_unsafe_modules_detects_threaded_imports() {
+        let dependency_dir = TempDir::new().unwrap();
+        let import_log = dependency_dir.path().join("import-log.txt");
+        let module_name = unique_module_name("unsafe_thread_dep");
+        let wrapper_module_name = unique_module_name("unsafe_thread_wrapper_dep");
+        let _import_log_env =
+            create_threaded_dependency(&dependency_dir, &module_name, &import_log);
+        fs::write(
+            dependency_dir
+                .path()
+                .join(format!("{wrapper_module_name}.py")),
+            format!("import {module_name}\n"),
+        )
+        .unwrap();
+
+        let _extra_path_guard = ExtraPythonPathGuard::register(dependency_dir.path().to_path_buf());
+        let modules = HashSet::from([
+            module_name.clone(),
+            wrapper_module_name.clone(),
+            "json".to_string(),
+        ]);
+        let python_path =
+            build_pythonpath("test_package", dependency_dir.path().to_str().unwrap()).unwrap();
+
+        let unsafe_modules = detect_fork_unsafe_modules(&modules, &python_path).unwrap();
+
+        assert!(
+            unsafe_modules.contains(&module_name),
+            "expected threaded import to be auto-ignored"
+        );
+        assert!(
+            unsafe_modules.contains(&wrapper_module_name),
+            "expected wrapper import with unsafe transitive side effects to be auto-ignored"
+        );
+        assert!(
+            !unsafe_modules.contains("json"),
+            "expected safe stdlib import to remain preloadable"
+        );
+    }
+
+    #[test]
+    fn test_boot_main_auto_ignores_imports_that_spawn_threads() {
+        let project_dir = TempDir::new().unwrap();
+        let dependency_dir = TempDir::new().unwrap();
+        let import_log = dependency_dir.path().join("import-log.txt");
+        let module_name = unique_module_name("unsafe_thread_dep");
+        let _import_log_env =
+            create_threaded_dependency(&dependency_dir, &module_name, &import_log);
+
+        let _extra_path_guard = ExtraPythonPathGuard::register(dependency_dir.path().to_path_buf());
+        create_temp_py_file(
+            &project_dir,
+            "main.py",
+            &format!("import {module_name}\nimport json\n"),
+        );
+
+        let mut runner =
+            Environment::new_for_test("test_package", project_dir.path().to_str().unwrap(), None);
+        runner.boot_main().expect("Failed to boot main environment");
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        runner.stop_main().expect("Failed to stop main environment");
+
+        let import_log_contents = fs::read_to_string(&import_log).unwrap();
+        assert_eq!(
+            import_log_contents.lines().count(),
+            1,
+            "unsafe dependency should only be imported by the disposable probe"
+        );
     }
 
     #[test]
