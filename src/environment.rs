@@ -6,7 +6,7 @@ use serde_json::{self};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -725,7 +725,9 @@ fn build_pythonpath(project_name: &str, project_path: &str) -> Result<OsString> 
         .flat_map(|python_path| std::env::split_paths(&python_path).collect::<Vec<_>>())
         .collect::<Vec<PathBuf>>();
 
-    push_pythonpath_entry(&mut paths, PathBuf::from(project_path));
+    if !path_matches_package_name(project_name, project_path) {
+        push_pythonpath_entry(&mut paths, PathBuf::from(project_path));
+    }
     push_pythonpath_entry(&mut paths, derive_import_root(project_name, project_path));
     for extra_path in extra_python_paths() {
         push_pythonpath_entry(&mut paths, extra_path);
@@ -738,6 +740,22 @@ fn push_pythonpath_entry(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if !path.as_os_str().is_empty() && !paths.iter().any(|existing| existing == &path) {
         paths.push(path);
     }
+}
+
+fn path_matches_package_name(project_name: &str, project_path: &str) -> bool {
+    let mut path_components = Path::new(project_path)
+        .components()
+        .rev()
+        .map(|component| component.as_os_str().to_string_lossy());
+
+    for package_component in project_name.split('.').rev() {
+        match path_components.next() {
+            Some(path_component) if path_component == package_component => {}
+            _ => return false,
+        }
+    }
+
+    true
 }
 
 fn derive_import_root(project_name: &str, project_path: &str) -> PathBuf {
@@ -949,7 +967,7 @@ mod tests {
         let import_root = temp_dir.path().to_path_buf();
         let extra_path = extra_path_dir.path().to_path_buf();
 
-        assert!(python_paths.contains(&project_path));
+        assert!(!python_paths.contains(&project_path));
         assert!(python_paths.contains(&import_root));
         assert!(python_paths.contains(&extra_path));
 
@@ -958,7 +976,7 @@ mod tests {
                 .iter()
                 .filter(|existing| *existing == &project_path)
                 .count(),
-            1
+            0
         );
         assert_eq!(
             python_paths
@@ -974,6 +992,52 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn test_build_pythonpath_keeps_non_package_project_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().to_path_buf();
+
+        let python_path = build_pythonpath("test_package", project_path.to_str().unwrap()).unwrap();
+        let python_paths = std::env::split_paths(&python_path).collect::<Vec<_>>();
+
+        assert!(python_paths.contains(&project_path));
+    }
+
+    #[test]
+    fn test_boot_main_does_not_expose_package_modules_as_top_level_imports() {
+        let project_root = TempDir::new().unwrap();
+        let dependency_dir = TempDir::new().unwrap();
+        let package_name = unique_module_name("shadow_package");
+        let dependency_name = unique_module_name("logging_user_dep");
+        let package_dir = project_root.path().join(&package_name);
+
+        std::fs::create_dir_all(&package_dir).unwrap();
+        fs::write(package_dir.join("__init__.py"), "").unwrap();
+        fs::write(
+            package_dir.join("logging.py"),
+            "VALUE = 'shadowed stdlib logging'\n",
+        )
+        .unwrap();
+        fs::write(
+            package_dir.join("main.py"),
+            format!("import {dependency_name}\n"),
+        )
+        .unwrap();
+        fs::write(
+            dependency_dir.path().join(format!("{dependency_name}.py")),
+            "import logging\nLOGGER = logging.getLogger('firehot.shadow-test')\n",
+        )
+        .unwrap();
+
+        let _extra_path_guard = ExtraPythonPathGuard::register(dependency_dir.path().to_path_buf());
+        let mut runner = Environment::new(&package_name, package_dir.to_str().unwrap(), None);
+
+        runner
+            .boot_main()
+            .expect("package modules should not shadow stdlib imports in dependencies");
+        runner.stop_main().expect("Failed to stop main environment");
     }
 
     #[test]
