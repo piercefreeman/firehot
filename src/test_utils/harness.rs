@@ -7,13 +7,12 @@ use log::{debug, info};
 
 use serde_json::{self, json};
 use std::fs;
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
+use std::process::Stdio;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use std::env;
-
-/// Python env guard that restores the original PYTHONPATH when dropped
+/// Keeps a temporary Python module alive for the duration of a test.
 pub struct PythonPathGuard {
     pub module_name: String,
     pub container_path: String,
@@ -23,25 +22,12 @@ pub struct PythonPathGuard {
 
 impl PythonPathGuard {
     fn new(module_name: String, temp_dir: TempDir) -> Self {
-        // Get the path from temp_dir
         let container_path = temp_dir
             .path()
             .to_str()
             .expect("Failed to convert temp dir path to string")
             .to_string();
-
-        // Add the new path to PYTHONPATH
-        if let Some(current_path) = env::var_os("PYTHONPATH") {
-            // If PYTHONPATH already exists, append the temp dir
-            let mut new_path = current_path.clone();
-            let path_separator = if cfg!(windows) { ";" } else { ":" };
-            new_path.push(path_separator);
-            new_path.push(&container_path);
-            env::set_var("PYTHONPATH", new_path);
-        } else {
-            // If PYTHONPATH doesn't exist, create it with just the temp dir
-            env::set_var("PYTHONPATH", &container_path);
-        }
+        crate::python::add_python_path(PathBuf::from(&container_path));
 
         Self {
             module_name,
@@ -53,36 +39,14 @@ impl PythonPathGuard {
 
 impl Drop for PythonPathGuard {
     fn drop(&mut self) {
-        // Get the current PYTHONPATH
-        if let Some(current_path) = env::var_os("PYTHONPATH") {
-            let current_path_str = current_path.to_str().unwrap_or("");
-            let path_separator = if cfg!(windows) { ";" } else { ":" };
-
-            // Split the current path into components
-            let mut components: Vec<&str> = current_path_str.split(path_separator).collect();
-
-            // Remove our specific directory from the components
-            components.retain(|&component| component != self.container_path);
-
-            // Rejoin the components to form the new path
-            let new_path = components.join(path_separator);
-
-            // If there are still components left, set the new path
-            // Otherwise, remove the PYTHONPATH variable
-            if !new_path.is_empty() {
-                env::set_var("PYTHONPATH", new_path);
-            } else {
-                env::remove_var("PYTHONPATH");
-            }
-        }
-        // If PYTHONPATH doesn't exist, nothing to do
+        crate::python::remove_python_path(PathBuf::from(&self.container_path).as_path());
     }
 }
 
 /// Higher-level function that prepares a Python script for execution in isolation.
 /// Used in our testing harness. NOTE: You must call this before any initialization of the first
-/// environment, otherwise the forked process won't pick up on our updated PYTHONPATH
-/// to import the mocked module. Otherwise you'll get an error during exec:
+/// environment, otherwise the forked process won't see the generated module path.
+/// Otherwise you'll get an error during exec:
 /// `No module named 'pymodule550871ccb8f44d3eae652d09468cef98'`
 ///
 /// This function:
@@ -93,8 +57,8 @@ impl Drop for PythonPathGuard {
 ///
 /// Returns a tuple containing:
 /// - The pickled, base64-encoded data ready for execution in isolation
-/// - The PythonPathGuard object that restores the original PYTHONPATH when dropped
-///   and cleans up the temporary directory when it goes out of scope
+/// - The PythonPathGuard object that keeps the temporary module directory alive
+///   and registers it for spawned Python child processes until the test finishes
 pub fn prepare_script_for_isolation(
     python_script: &str,
     func_name: &str,
@@ -164,12 +128,11 @@ print(pickled_data)
     // Create a path we can use after transferring ownership of temp_dir
     let pickle_script_path_string = pickle_script_path.to_string_lossy().to_string();
 
-    // Create the PythonPathGuard which takes ownership of temp_dir, updates PYTHONPATH,
-    // and will handle cleanup when dropped
+    // Keep the temporary module directory alive until the caller finishes using it.
     let python_path_guard = PythonPathGuard::new(module_name, temp_dir);
 
     // Run the pickle script with the payload as an argument
-    let child = Command::new("python")
+    let child = crate::python::python_command()
         .arg(&pickle_script_path_string)
         .arg(&json_payload)
         .stdout(Stdio::piped())

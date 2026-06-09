@@ -6,6 +6,8 @@ Intended for embeddable usage in Rust, can only import stdlib modules.
 
 """
 
+from __future__ import annotations
+
 import errno
 import fcntl
 import logging
@@ -23,7 +25,15 @@ from sys import _current_frames
 from time import sleep
 from traceback import format_exc, format_stack
 
-from firehot.firehot import get_total_thread_count
+try:
+    from firehot._core import get_total_thread_count
+except ImportError:
+
+    def get_total_thread_count() -> int:
+        """Best-effort fallback when the Rust extension module is unavailable."""
+
+        return threading.active_count()
+
 
 try:
     from enum import StrEnum

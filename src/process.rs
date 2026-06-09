@@ -1,7 +1,7 @@
 use std::io;
 
 #[cfg(target_os = "macos")]
-use libc::{c_int, proc_pidinfo, PROC_PIDTASKINFO};
+use libc::{PROC_PIDTASKINFO, c_int, proc_pidinfo};
 
 #[cfg(target_os = "linux")]
 use std::fs;
@@ -96,6 +96,7 @@ pub fn get_total_thread_count() -> Result<u32, io::Error> {
 mod tests {
     use super::*;
     use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn test_thread_count() {
@@ -113,14 +114,20 @@ mod tests {
             })
             .collect();
 
-        // Sleep briefly to ensure threads are running
-        thread::sleep(std::time::Duration::from_millis(50));
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let mut new_count = initial_count;
+        while Instant::now() < deadline {
+            new_count = new_count.max(get_total_thread_count().unwrap());
+            if new_count >= initial_count + 3 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
 
-        // Get new thread count
-        let new_count = get_total_thread_count().unwrap();
-
-        // Should have at least 3 more threads than initial
-        assert!(new_count >= initial_count + 3);
+        assert!(
+            new_count >= initial_count + 3,
+            "expected at least 3 additional threads, saw initial={initial_count}, observed_max={new_count}"
+        );
 
         // Clean up threads
         for handle in handles {

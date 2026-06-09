@@ -1,17 +1,19 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any, Callable
 from uuid import UUID
 
-from firehot.firehot import (
+from firehot._core import (
     communicate_isolated as communicate_isolated_rs,
 )
-from firehot.firehot import (
+from firehot._core import (
     exec_isolated as exec_isolated_rs,
 )
-from firehot.firehot import (
+from firehot._core import (
     stop_isolated as stop_isolated_rs,
 )
-from firehot.firehot import (
+from firehot._core import (
     update_environment as update_environment_rs,
 )
 from firehot.naming import NAME_REGISTRY
