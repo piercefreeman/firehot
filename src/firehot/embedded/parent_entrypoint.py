@@ -543,16 +543,37 @@ def execute_dynamic_imports(
             sys.exit(1)
 
 
-def main():
-    dynamic_imports = sys.argv[1] if len(sys.argv) > 1 else ""
-    module_locations_json = sys.argv[2] if len(sys.argv) > 2 else "{}"
-    firehot_logger = build_firehot_logger()
+def read_startup_payload() -> tuple[str, dict[str, Any]]:
+    if len(sys.argv) > 1:
+        dynamic_imports = sys.argv[1]
+        module_locations_json = sys.argv[2] if len(sys.argv) > 2 else "{}"
+        try:
+            module_locations = json_loads(module_locations_json)
+        except (JSONDecodeError, ValueError):
+            module_locations = {}
+        return dynamic_imports, module_locations
 
-    # Parse module locations for error reporting
+    payload_line = sys.stdin.readline()
+    if not payload_line:
+        return "", {}
+
     try:
-        module_locations = json_loads(module_locations_json)
-    except (JSONDecodeError, ValueError):
-        module_locations = {}
+        payload = json_loads(payload_line)
+        dynamic_imports = payload.get("dynamic_imports", "")
+        module_locations = payload.get("module_locations", {})
+        if not isinstance(dynamic_imports, str):
+            raise ValueError("Expected startup dynamic_imports to be a JSON string")
+        if not isinstance(module_locations, dict):
+            raise ValueError("Expected startup module_locations to be a JSON object")
+        return dynamic_imports, module_locations
+    except (JSONDecodeError, ValueError) as e:
+        write_message(ImportError(error=str(e), traceback=format_exc()))
+        sys.exit(1)
+
+
+def main():
+    dynamic_imports, module_locations = read_startup_payload()
+    firehot_logger = build_firehot_logger()
 
     # Execute the dynamic imports
     try:
