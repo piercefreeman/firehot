@@ -699,22 +699,35 @@ fn spawn_python_loader(
 
     debug!("Module import JSON: {}", import_json);
 
-    // Convert module locations to JSON
-    let locations_json = serde_json::to_string(&module_locations)
-        .map_err(|e| anyhow!("Failed to serialize module locations: {}", e))?;
-    debug!("Module locations JSON: {}", locations_json);
+    let startup_payload = serde_json::to_string(&serde_json::json!({
+        "dynamic_imports": import_json,
+        "module_locations": module_locations,
+    }))
+    .map_err(|e| anyhow!("Failed to serialize loader startup payload: {}", e))?;
+    debug!(
+        "Loader startup payload byte length: {}",
+        startup_payload.len()
+    );
 
     // Spawn Python process with all modules pre-imported
-    let child = python_command()
+    let mut child = python_command()
         .env("PYTHONPATH", python_path)
         .args(["-c", PYTHON_LOADER_SCRIPT])
-        .arg(import_json)
-        .arg(locations_json)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| anyhow!("Failed to spawn Python process: {}", e))?;
+
+    let stdin = child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| anyhow!("Failed to capture stdin for Python loader"))?;
+    stdin
+        .write_all(startup_payload.as_bytes())
+        .and_then(|_| stdin.write_all(b"\n"))
+        .and_then(|_| stdin.flush())
+        .map_err(|e| anyhow!("Failed to write Python loader startup payload: {}", e))?;
 
     Ok(child)
 }
@@ -1038,6 +1051,39 @@ mod tests {
             .boot_main()
             .expect("package modules should not shadow stdlib imports in dependencies");
         runner.stop_main().expect("Failed to stop main environment");
+    }
+
+    #[test]
+    fn test_spawn_python_loader_accepts_large_startup_payload() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir
+            .path()
+            .join(format!("{}.py", "x".repeat(240)))
+            .to_string_lossy()
+            .to_string();
+        let module_locations = HashMap::from([(
+            "json".to_string(),
+            (0..40_000)
+                .map(|line| crate::ast::SourceLocation {
+                    file_path: file_path.clone(),
+                    line,
+                    column: 1,
+                    end_line: None,
+                    end_column: None,
+                })
+                .collect::<Vec<_>>(),
+        )]);
+        let modules = HashSet::new();
+        let python_path = OsString::new();
+
+        let mut child = spawn_python_loader(&modules, &module_locations, &python_path)
+            .expect("loader startup payload should not be limited by OS argv size");
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            writeln!(stdin, r#"{{"name":"EXIT_REQUEST"}}"#).unwrap();
+        }
+
+        child.wait().expect("loader child should exit cleanly");
     }
 
     #[test]
